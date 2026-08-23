@@ -79,12 +79,13 @@ static void WriteCommand(uint8_t cmd)
     I2C_Stop();
 }
 
-static void WriteData(uint8_t dat)
+static void WriteDataBuf(const uint8_t *buf, uint8_t len)
 {
     I2C_Start();
     I2C_SendByte(0x78);   /* slave addr */
     I2C_SendByte(0x40);   /* data mode */
-    I2C_SendByte(dat);
+    for (uint8_t i = 0; i < len; i++)
+        I2C_SendByte(buf[i]);
     I2C_Stop();
 }
 
@@ -98,22 +99,21 @@ static void SetCursor(uint8_t Y, uint8_t X)
 /* -------- public API -------- */
 void OLED_Clear(void)
 {
+    static const uint8_t zeros[128] = {0};
     for (uint8_t j = 0; j < 8; j++)
     {
         SetCursor(j, 0);
-        for (uint8_t i = 0; i < 128; i++)
-            WriteData(0x00);
+        WriteDataBuf(zeros, 128);
     }
 }
 
 void OLED_ShowChar(uint8_t Line, uint8_t Column, char Char)
 {
+    const uint8_t *f = OLED_F8x16[Char - ' '];
     SetCursor((Line - 1) * 2, (Column - 1) * 8);
-    for (uint8_t i = 0; i < 8; i++)
-        WriteData(OLED_F8x16[Char - ' '][i]);
+    WriteDataBuf(f, 8);
     SetCursor((Line - 1) * 2 + 1, (Column - 1) * 8);
-    for (uint8_t i = 0; i < 8; i++)
-        WriteData(OLED_F8x16[Char - ' '][i + 8]);
+    WriteDataBuf(f + 8, 8);
 }
 
 void OLED_ShowString(uint8_t Line, uint8_t Column, char *String)

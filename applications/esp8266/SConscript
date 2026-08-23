@@ -1,0 +1,8 @@
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+CPPPATH = [cwd]
+
+group = DefineGroup('esp8266', src, depend = [''], CPPPATH = CPPPATH)
+Return('group')

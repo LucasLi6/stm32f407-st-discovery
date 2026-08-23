@@ -60,33 +60,6 @@ static void shell_write(const char *str)
     }
 }
 
-/* broadcast to all connected remote terminals */
-static void shell_write_all(const char *str)
-{
-    rt_kprintf("%s", str);
-    int slen = rt_strlen(str);
-    for (int l = 0; l < 5; l++) {
-        if (_out_len[l] + slen < 768 - 1) {
-            rt_memcpy(_out_buf[l] + _out_len[l], str, slen);
-            _out_len[l] += slen;
-            _out_buf[l][_out_len[l]] = '\0';
-        }
-    }
-}
-
-/* flush all link buffers (call after broadcast) */
-static void remote_flush_all(void)
-{
-    for (int l = 0; l < 5; l++) {
-        if (_remote_dev && _out_len[l] > 0) {
-            writer_post(0, l, _out_buf[l], _out_len[l] + 1);
-            _out_len[l] = 0;
-            while (_tx_busy) rt_thread_mdelay(10);  /* wait for writer to finish */
-        }
-    }
-    rt_kprintf(SHELL_PROMPT);
-}
-
 /* ===================================================================
  *  Writer-thread IPC — one writer, per-link output
  *  =================================================================== */
