@@ -1,0 +1,20 @@
+--cpu=Cortex-M4.fp
+".\bootloader\objects\main.o"
+".\bootloader\objects\flash_ops.o"
+".\bootloader\objects\ymodem.o"
+".\bootloader\objects\esp8266_at.o"
+".\bootloader\objects\oled.o"
+".\bootloader\objects\system_stm32f4xx.o"
+".\bootloader\objects\stm32f4xx_hal.o"
+".\bootloader\objects\stm32f4xx_hal_rcc.o"
+".\bootloader\objects\stm32f4xx_hal_rcc_ex.o"
+".\bootloader\objects\stm32f4xx_hal_gpio.o"
+".\bootloader\objects\stm32f4xx_hal_uart.o"
+".\bootloader\objects\stm32f4xx_hal_usart.o"
+".\bootloader\objects\stm32f4xx_hal_dma.o"
+".\bootloader\objects\stm32f4xx_hal_cortex.o"
+".\bootloader\objects\stm32f4xx_hal_pwr.o"
+--library_type=microlib --strict --scatter ".\bootloader\linker_scripts\link.sct"
+--entry=Reset_Handler --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list ".\bootloader\Listings\bootloader.map" -o .\bootloader\Objects\bootloader.axf

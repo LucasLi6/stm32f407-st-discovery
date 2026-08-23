@@ -1,0 +1,47 @@
+Bootloader Build Instructions (Keil MDK)
+=========================================
+
+1. Create a new Keil uVision project for STM32F103C8.
+   Target options:
+     - IROM: 0x08000000  Size: 0x4000  (16 KB)
+     - IRAM: 0x20000000  Size: 0x5000  (20 KB)
+     - Scatter file: .\linker_scripts\link.sct
+
+2. Add source files:
+     main.c
+     flash_ops.c
+     esp8266_at.c
+
+3. Add include paths:
+     .  (bootloader directory)
+     ..\libraries\STM32F1xx_HAL\CMSIS\Include
+     ..\libraries\STM32F1xx_HAL\CMSIS\Device\ST\STM32F1xx\Include
+     ..\board\CubeMX_Config\Inc
+
+4. Preprocessor defines:
+     STM32F103xB, USE_HAL_DRIVER
+
+5. Build.  Output: bootloader.hex or bootloader.bin
+
+6. Flash to 0x08000000 using ST-Link or serial ISP.
+
+
+OTA Usage (TCP Server mode)
+============================
+
+1. APP terminal:  STM32> ota
+   → Writes magic flag to 0x0800F000 and reboots.
+
+2. Bootloader sees flag → erases it → connects WiFi → starts TCP server
+   → LED shows: fast-blink = connecting, solid = client connected
+
+3. PC (same WiFi network, any OS):
+     ncat <ip> 8888 < rtthread.bin
+
+   Example:  ncat 192.168.1.105 8888 < rtthread.bin
+
+   If ncat isn't available, use:  nc <ip> 8888 < rtthread.bin
+
+4. LED slow-blinks 3 times → complete → jumps to new firmware.
+
+No server, no hardcoded IP, no HTTP — just a raw TCP pipe.
