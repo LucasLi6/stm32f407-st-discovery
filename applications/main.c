@@ -10,6 +10,7 @@
 #include "shell/shell.h"
 #include "esp8266/esp8266.h"
 #include "oled/OLED.h"
+#include "wifi_config.h"
 
 #define APP_FLASH_BASE  0x08005000  /* must match APP_BASE in partition.h */
 #define LED0_PIN        GET_PIN(A, 1)
@@ -74,7 +75,21 @@ int main(void)
     OLED_Init();
     OLED_ShowString(1, 1, "WiFi: init...");
 
-    /* init ESP8266 WiFi (uart2 -> TCP Server port 23) */
+    /* load saved WiFi mode (default STA) + AP credentials */
+    {
+        int mode = WIFI_MODE_STA;
+        char ssid[33] = "STM32-AP";
+        char pass[65] = "12345678";
+        if (wifi_mode_load(&mode, ssid, sizeof(ssid), pass, sizeof(pass)) == 0)
+        {
+            /* saved config loaded */
+        }
+        g_wifi_mode = mode;
+        rt_strncpy(g_ap_ssid, ssid, 32); g_ap_ssid[32] = '\0';
+        rt_strncpy(g_ap_pass, pass, 64); g_ap_pass[64] = '\0';
+    }
+
+    /* init ESP8266 WiFi (uart2 -> TCP Server port 23), STA or AP mode */
     esp8266_init();
 
     /* start terminal shell (uart1 + uart2) */

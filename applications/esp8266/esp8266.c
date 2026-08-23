@@ -22,6 +22,9 @@
 static rt_device_t _esp_dev = RT_NULL;
 char g_esp8266_ip[17] = {0};  /* exposed for OLED re-display */
 char g_connected_ssid[33] = {0};  /* SSID that actually connected */
+int  g_wifi_mode = WIFI_MODE_STA;
+char g_ap_ssid[33] = "STM32-AP";
+char g_ap_pass[65] = "12345678";
 
 /* ---------- AT command helper ---------- */
 
@@ -160,18 +163,37 @@ int esp8266_init(void)
     }
     LOG_I("ESP8266 handshake OK at 115200 baud");
 
-    /* 4. station mode */
-    at_send("AT+CWMODE=1\r\n", "OK", 1000);
-
-    /* 5. connect to WiFi using stored credentials (priority order) */
-    if (wifi_config_connect(_esp_dev) != 0)
+    /* 4. WiFi mode: AP (softAP) or STA (station) */
+    if (g_wifi_mode == WIFI_MODE_AP)
     {
-        LOG_E("WiFi connect failed (no saved networks or all failed).");
-        OLED_ShowString(1, 1, "No WiFi saved  ");
-        rt_device_close(_esp_dev);
-        return -RT_ERROR;
+        at_send("AT+CWMODE=2\r\n", "OK", 1000);
+
+        char cmd[128];
+        rt_snprintf(cmd, sizeof(cmd), "AT+CWSAP=\"%s\",\"%s\",1,3\r\n",
+                    g_ap_ssid, g_ap_pass);
+        if (at_send(cmd, "OK", 3000) != RT_EOK)
+        {
+            LOG_E("AP config failed");
+            OLED_ShowString(1, 1, "ESP8266 AP Err ");
+            rt_device_close(_esp_dev);
+            return -RT_ERROR;
+        }
+        LOG_I("AP started: SSID=%s", g_ap_ssid);
     }
-    LOG_I("WiFi connected");
+    else
+    {
+        at_send("AT+CWMODE=1\r\n", "OK", 1000);
+
+        /* connect to WiFi using stored credentials (priority order) */
+        if (wifi_config_connect(_esp_dev) != 0)
+        {
+            LOG_E("WiFi connect failed (no saved networks or all failed).");
+            OLED_ShowString(1, 1, "No WiFi saved  ");
+            rt_device_close(_esp_dev);
+            return -RT_ERROR;
+        }
+        LOG_I("WiFi connected");
+    }
 
     /* 6. multi-connection mode */
     at_send("AT+CIPMUX=1\r\n", "OK", 1000);
@@ -188,7 +210,7 @@ int esp8266_init(void)
 
     /* 8. query and print IP */
     {
-        char buf[256], *start, *end;
+        char buf[256], *ip_start;
         int len;
 
         {
@@ -203,28 +225,44 @@ int esp8266_init(void)
 
         if (len > 0)
         {
-            start = rt_strstr(buf, "+CIFSR:STAIP,\"");
-            if (start)
+            /* locate the IP: mode-specific prefix first, then any +CIFSR: line */
+            if (g_wifi_mode == WIFI_MODE_AP)
+                ip_start = rt_strstr(buf, "+CIFSR:APIP,\"");
+            else
+                ip_start = rt_strstr(buf, "+CIFSR:STAIP,\"");
+            if (!ip_start)
+                ip_start = rt_strstr(buf, "+CIFSR:");
+
+            char *q = ip_start;
+            while (q && *q && *q != '"') q++;
+            if (q && *q == '"')
             {
-                start += 14;
-                end = rt_strstr(start, "\"");
-                if (end) *end = '\0';
+                char *ip = q + 1;
+                char *e = ip;
+                while (*e && *e != '"') e++;
+                *e = '\0';
 
                 /* show IP on OLED line 1 */
-                {
-                    rt_snprintf(g_esp8266_ip, sizeof(g_esp8266_ip), "%-16s", start);
-                    OLED_ShowString(1, 1, g_esp8266_ip);
-                }
+                rt_snprintf(g_esp8266_ip, sizeof(g_esp8266_ip), "%-16s", ip);
+                OLED_ShowString(1, 1, g_esp8266_ip);
 
                 rt_kprintf("\r\n");
                 rt_kprintf("  +----------------------------------+\r\n");
-                rt_kprintf("  |  ESP8266 WiFi Connected          |\r\n");
-                rt_kprintf("  |  SSID: %-24s |\r\n",
-                         g_connected_ssid[0] ? g_connected_ssid : "(saved)");
-                rt_kprintf("  |  IP:   %-24s  |\r\n", start);
+                if (g_wifi_mode == WIFI_MODE_AP)
+                {
+                    rt_kprintf("  |  ESP8266 AP mode                 |\r\n");
+                    rt_kprintf("  |  AP SSID: %-22s |\r\n", g_ap_ssid);
+                }
+                else
+                {
+                    rt_kprintf("  |  ESP8266 WiFi Connected          |\r\n");
+                    rt_kprintf("  |  SSID: %-24s |\r\n",
+                             g_connected_ssid[0] ? g_connected_ssid : "(saved)");
+                }
+                rt_kprintf("  |  IP:   %-24s  |\r\n", ip);
                 rt_kprintf("  |  Port: 23 (telnet)               |\r\n");
                 rt_kprintf("  +----------------------------------+\r\n");
-                rt_kprintf("  |  telnet %-23s  |\r\n", start);
+                rt_kprintf("  |  telnet %-23s  |\r\n", ip);
                 rt_kprintf("  +----------------------------------+\r\n\r\n");
             }
             else

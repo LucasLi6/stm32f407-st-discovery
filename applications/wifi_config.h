@@ -46,4 +46,13 @@ void wifi_config_show(void (*write_fn)(const char *));
  * Returns 0 on success, -1 if all fail. */
 int wifi_config_connect(rt_device_t esp_dev);
 
+/* ---- WiFi mode (STA / AP) persistence ---- */
+
+/* Load saved mode (0=STA, 1=AP) + AP credentials. Returns 0 if a saved
+ * config exists, -1 if none (caller should use defaults). */
+int wifi_mode_load(int *mode, char *ssid, int ssid_sz, char *pass, int pass_sz);
+
+/* Save mode + AP credentials to flash. Returns 0 on success. */
+int wifi_mode_save(int mode, const char *ssid, const char *pass);
+
 #endif

@@ -10,6 +10,7 @@
 #include "shell.h"
 #include "../oled/OLED.h"
 #include "../wifi_config.h"
+#include "../esp8266/esp8266.h"
 
 extern void shell_led_on(void);
 extern void shell_led_off(void);
@@ -158,6 +159,7 @@ static void cmd_help(int argc, char **argv)
     shell_write("  wifi save     - save WiFi <ssid> <pass> [prio]\r\n");
     shell_write("  wifi delete   - delete WiFi by priority\r\n");
     shell_write("  wifi exc      - swap two WiFi priorities\r\n");
+    shell_write("  wifi mode     - set mode: sta | ap [ssid] [pass]\r\n");
     shell_write("\r\n");
 }
 
@@ -261,6 +263,7 @@ static void cmd_wifi(int argc, char **argv)
         shell_write("  wifi show                  - list saved networks\r\n");
         shell_write("  wifi save <ssid> <pass> [p]- save network at priority p\r\n");
         shell_write("  wifi delete <priority>     - delete network\r\n");
+        shell_write("  wifi mode <sta|ap> [ssid] [pass]\r\n");
         return;
     }
 
@@ -300,6 +303,32 @@ static void cmd_wifi(int argc, char **argv)
             shell_write("WiFi priorities swapped.\r\n");
         else
             shell_write("Error: priority not found.\r\n");
+    }
+    else if (rt_strcmp(argv[1], "mode") == 0) {
+        if (argc < 3) {
+            shell_write("Usage: wifi mode <sta|ap> [ap_ssid] [ap_pass]\r\n");
+            return;
+        }
+        int mode = WIFI_MODE_STA;
+        if (rt_strcmp(argv[2], "ap") == 0)        mode = WIFI_MODE_AP;
+        else if (rt_strcmp(argv[2], "sta") == 0)  mode = WIFI_MODE_STA;
+        else {
+            shell_write("mode must be 'sta' or 'ap'\r\n");
+            return;
+        }
+
+        const char *ssid = (argc >= 4) ? argv[3] : g_ap_ssid;
+        const char *pass = (argc >= 5) ? argv[4] : g_ap_pass;
+
+        if (wifi_mode_save(mode, ssid, pass) == 0) {
+            shell_write(mode == WIFI_MODE_AP
+                        ? "AP mode saved. Rebooting...\r\n"
+                        : "STA mode saved. Rebooting...\r\n");
+            rt_thread_mdelay(100);
+            rt_hw_cpu_reset();
+        } else {
+            shell_write("Error: failed to save mode to flash.\r\n");
+        }
     }
     else {
         shell_write("Unknown wifi sub-command.\r\n");

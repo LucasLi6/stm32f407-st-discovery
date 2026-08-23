@@ -32,6 +32,34 @@ typedef struct {
     char     reserved[24];   /* 0x68: pad to 128 */
 } flash_entry_t;
 
+/* ---- WiFi mode config (sector 7, 0x08060800, in the 4KB gap) ---- */
+#define WIFI_MODE_FLASH_BASE  0x08060800UL
+#define WIFI_MODE_MAGIC       0x4D4F4445UL   /* "MODE" */
+
+typedef struct {
+    uint32_t magic;          /* 0x00: WIFI_MODE_MAGIC */
+    uint32_t mode;           /* 0x04: 0=STA, 1=AP */
+    char     ap_ssid[32];    /* 0x08 */
+    char     ap_pass[64];    /* 0x28 */
+    char     reserved[24];   /* 0x68: pad to 128 */
+} wifi_mode_raw_t;
+
+static wifi_mode_raw_t _mode_buf;
+
+/* ---- OTA server config (sector 7, 0x08061800) ---- */
+#define OTA_CONFIG_MAGIC   0x4F544143  /* "OTAC" */
+#define OTA_CONFIG_BASE    0x08061800
+#define OTA_IP_MAX         32
+#define OTA_PATH_MAX       64
+
+typedef struct {
+    uint32_t magic;
+    char     server_ip[OTA_IP_MAX];
+    uint16_t server_port;
+    char     http_path[OTA_PATH_MAX];
+    char     reserved[22];
+} ota_config_raw_t;
+
 /* ---- shared work buffer (one copy, not per-function) ---- */
 static flash_entry_t _raw_buf[ENTRY_COUNT];       /* 2048 B */
 static wifi_info_t   _info_buf[WIFI_MAX_ENTRIES];  /* 1632 B */
@@ -83,8 +111,19 @@ static void flash_write_words(uint32_t addr, const uint32_t *data, int count)
     FLASH->CR |= FLASH_CR_LOCK;
 }
 
-static int flash_save_all(flash_entry_t *entries)
+/* sync the in-memory mode buffer from flash (so a sector erase doesn't lose it) */
+static void _mode_sync_from_flash(void)
 {
+    rt_memcpy(&_mode_buf, (const void *)WIFI_MODE_FLASH_BASE, sizeof(_mode_buf));
+}
+
+/* one owner of sector-7 writes: erase, then write wifi + mode + ota together.
+ * Callers must leave _mode_buf in sync (via _mode_sync_from_flash, or set it). */
+static int _sector_commit(flash_entry_t *entries)
+{
+    ota_config_raw_t ota_saved;
+    rt_memcpy(&ota_saved, (const void *)OTA_CONFIG_BASE, sizeof(ota_saved));
+
     flash_erase_config_sector();
 
     uint32_t *src = (uint32_t *)entries;
@@ -96,7 +135,51 @@ static int flash_save_all(flash_entry_t *entries)
     if (has_data)
         flash_write_words(WIFI_FLASH_BASE, src, count);
 
+    if (_mode_buf.magic == WIFI_MODE_MAGIC)
+        flash_write_words(WIFI_MODE_FLASH_BASE, (uint32_t *)&_mode_buf,
+                          (sizeof(_mode_buf) + 3) / 4);
+
+    if (ota_saved.magic == OTA_CONFIG_MAGIC)
+        flash_write_words(OTA_CONFIG_BASE, (uint32_t *)&ota_saved,
+                          (sizeof(ota_saved) + 3) / 4);
+
     return 0;
+}
+
+static int flash_save_all(flash_entry_t *entries)
+{
+    _mode_sync_from_flash();   /* preserve current mode across the erase */
+    return _sector_commit(entries);
+}
+
+/* ---- WiFi mode (STA / AP) persistence ---- */
+
+int wifi_mode_load(int *mode, char *ssid, int ssid_sz, char *pass, int pass_sz)
+{
+    _mode_sync_from_flash();
+    if (_mode_buf.magic != WIFI_MODE_MAGIC)
+        return -1;
+
+    if (mode) *mode = (int)_mode_buf.mode;
+    if (ssid) { rt_strncpy(ssid, _mode_buf.ap_ssid, ssid_sz - 1); ssid[ssid_sz - 1] = '\0'; }
+    if (pass) { rt_strncpy(pass, _mode_buf.ap_pass, pass_sz - 1); pass[pass_sz - 1] = '\0'; }
+    return 0;
+}
+
+int wifi_mode_save(int mode, const char *ssid, const char *pass)
+{
+    flash_entry_t *raw = _raw_buf;
+    flash_load_all(raw);
+
+    rt_memset(&_mode_buf, 0, sizeof(_mode_buf));
+    _mode_buf.magic = WIFI_MODE_MAGIC;
+    _mode_buf.mode  = (uint32_t)mode;
+    rt_strncpy(_mode_buf.ap_ssid, ssid ? ssid : "", 32);
+    rt_strncpy(_mode_buf.ap_pass, pass ? pass : "", 64);
+    _mode_buf.ap_ssid[31] = '\0';
+    _mode_buf.ap_pass[63] = '\0';
+
+    return _sector_commit(raw);
 }
 
 static int cmp_priority(const void *a, const void *b)
@@ -315,19 +398,6 @@ int wifi_config_connect(rt_device_t esp_dev)
 }
 
 /* ---- OTA server config (Sector 7, 0x08061800) ---- */
-
-#define OTA_CONFIG_MAGIC   0x4F544143  /* "OTAC" */
-#define OTA_CONFIG_BASE    0x08061800
-#define OTA_IP_MAX         32
-#define OTA_PATH_MAX       64
-
-typedef struct {
-    uint32_t magic;
-    char     server_ip[OTA_IP_MAX];
-    uint16_t server_port;
-    char     http_path[OTA_PATH_MAX];
-    char     reserved[22];
-} ota_config_raw_t;
 
 static ota_config_raw_t _ota_cfg;
 
