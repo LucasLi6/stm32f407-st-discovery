@@ -89,7 +89,7 @@ def main():
                 print("  Invalid, try again.")
 
     data = open(bin_path, 'rb').read()
-    APP_MAX = 56 * 1024  # must match APP_SIZE in partition.h
+    APP_MAX = 208 * 1024  # must match FW_SIZE in partition.h
     if len(data) > APP_MAX:
         print(f"\nERROR: {os.path.basename(bin_path)} is {len(data)/1024:.1f} KB.")
         print(f"       APP partition is only {APP_MAX/1024:.0f} KB.")

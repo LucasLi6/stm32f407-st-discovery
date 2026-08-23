@@ -1,9 +1,10 @@
 /*
  * WiFi credential manager — flash-backed storage (STM32F4 internal flash)
  *
- * Flash layout: Sector 7 (0x08060000, 128KB)
+ * Flash layout: Sector 2 (0x08008000, 16 KB) — see partition.h CONFIG_*
  *   WIFI_CONFIG: first 2 KB, 16 entries × 128 bytes
- *   OTA_CONFIG:  at 0x08061800
+ *   MODE:        at 0x08008800
+ *   OTA_CONFIG:  at 0x08009800
  */
 
 #include "wifi_config.h"
@@ -13,11 +14,11 @@
 #include <stdlib.h>
 #include <board.h>
 
-/* ---- STM32F407VET6 Sector 7 ---- */
-#define WIFI_FLASH_BASE     0x08060000UL
+/* ---- STM32F407VET6 Sector 2 ---- */
+#define WIFI_FLASH_BASE     0x08008000UL
 #define WIFI_FLASH_SIZE     (2 * 1024)
 #define WIFI_FLASH_END      (WIFI_FLASH_BASE + WIFI_FLASH_SIZE)
-#define WIFI_FLASH_SECTOR   7
+#define WIFI_FLASH_SECTOR   2
 #define ENTRY_SIZE          128
 #define ENTRY_COUNT         (WIFI_FLASH_SIZE / ENTRY_SIZE)
 
@@ -32,8 +33,8 @@ typedef struct {
     char     reserved[24];   /* 0x68: pad to 128 */
 } flash_entry_t;
 
-/* ---- WiFi mode config (sector 7, 0x08060800, in the 4KB gap) ---- */
-#define WIFI_MODE_FLASH_BASE  0x08060800UL
+/* ---- WiFi mode config (sector 2, 0x08008800, in the 4KB gap) ---- */
+#define WIFI_MODE_FLASH_BASE  0x08008800UL
 #define WIFI_MODE_MAGIC       0x4D4F4445UL   /* "MODE" */
 
 typedef struct {
@@ -46,9 +47,9 @@ typedef struct {
 
 static wifi_mode_raw_t _mode_buf;
 
-/* ---- OTA server config (sector 7, 0x08061800) ---- */
+/* ---- OTA server config (sector 2, 0x08009800) ---- */
 #define OTA_CONFIG_MAGIC   0x4F544143  /* "OTAC" */
-#define OTA_CONFIG_BASE    0x08061800
+#define OTA_CONFIG_BASE    0x08009800
 #define OTA_IP_MAX         32
 #define OTA_PATH_MAX       64
 
@@ -74,7 +75,7 @@ static int flash_load_all(flash_entry_t *entries)
     return ENTRY_COUNT;
 }
 
-/* F4 sector erase (only sector 7 used here) */
+/* F4 sector erase (only sector 2 used here) */
 static void flash_erase_config_sector(void)
 {
     if (FLASH->CR & FLASH_CR_LOCK) {
@@ -117,7 +118,7 @@ static void _mode_sync_from_flash(void)
     rt_memcpy(&_mode_buf, (const void *)WIFI_MODE_FLASH_BASE, sizeof(_mode_buf));
 }
 
-/* one owner of sector-7 writes: erase, then write wifi + mode + ota together.
+/* one owner of sector-2 writes: erase, then write wifi + mode + ota together.
  * Callers must leave _mode_buf in sync (via _mode_sync_from_flash, or set it). */
 static int _sector_commit(flash_entry_t *entries)
 {
@@ -397,7 +398,7 @@ int wifi_config_connect(rt_device_t esp_dev)
     return -1;
 }
 
-/* ---- OTA server config (Sector 7, 0x08061800) ---- */
+/* ---- OTA server config (Sector 2, 0x08009800) ---- */
 
 static ota_config_raw_t _ota_cfg;
 

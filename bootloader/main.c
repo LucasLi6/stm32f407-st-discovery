@@ -1,5 +1,14 @@
 /*
- * STM32F407VET6 Bootloader — Ymodem (UART1) + TCP/WiFi OTA
+ * STM32F407VET6 Bootloader — dual-slot (A/B) OTA
+ *
+ * Flash layout (see partition.h):
+ *   S0           bootloader
+ *   S1           boot meta  (slot CRC32 + OTA progress state)
+ *   S2           app config (wifi / mode / ota server)
+ *   S3~S5  APP1  primary slot, always booted
+ *   S6~S7  APP2  byte-level backup, never executed in place
+ *
+ * OTA over Ymodem (UART1 serial) or Ymodem-over-TCP (ESP8266 WiFi).
  */
 
 #include "partition.h"
@@ -75,14 +84,10 @@ static void uart_puts(const char *s) { while (*s) ymodem_putc(*s++); }
 
 static void clock_init(void)
 {
-    /* Use HSI (internal 16MHz RC) — no external crystal dependency.
-     * Try HSE first, fall back to HSI if not ready within ~2ms.
-     */
     uint32_t src = RCC_PLLCFGR_PLLSRC_HSI;
     uint32_t pllm = 16;  /* HSI / 16 = 1MHz VCO input */
 
     RCC->CR |= RCC_CR_HSEON;
-    /* Wait up to ~4000 AHB cycles (≈500µs @ HSI 8MHz after reset) */
     for (volatile uint32_t i = 0; i < 4000; i++) {
         if (RCC->CR & RCC_CR_HSERDY) {
             src  = RCC_PLLCFGR_PLLSRC_HSE;
@@ -90,21 +95,15 @@ static void clock_init(void)
             break;
         }
     }
-    /* If HSE didn't start, disable it and use HSI */
     if (src == RCC_PLLCFGR_PLLSRC_HSI)
         RCC->CR &= ~RCC_CR_HSEON;
 
-    /* Flash: 5 wait states, prefetch + data + instruction cache */
     FLASH->ACR = FLASH_ACR_PRFTEN | FLASH_ACR_ICEN | FLASH_ACR_DCEN
                | FLASH_ACR_LATENCY_5WS;
 
-    /* APB prescalers: APB1=/4 (42MHz max), APB2=/2 (84MHz max) */
     RCC->CFGR &= ~(RCC_CFGR_PPRE1_Msk | RCC_CFGR_PPRE2_Msk);
     RCC->CFGR |= RCC_CFGR_PPRE1_DIV4 | RCC_CFGR_PPRE2_DIV2;
 
-    /* PLL: SRC / PLLM * PLLN / PLLP = 1MHz * 336 / 2 = 168MHz
-     * PLLQ must match the APP's expected value (7 → 48MHz) or the
-     * APP's HAL_RCC_OscConfig will detect a mismatch and fail. */
     RCC->PLLCFGR = (pllm << RCC_PLLCFGR_PLLM_Pos)
                  | (336 << RCC_PLLCFGR_PLLN_Pos)
                  | (0   << RCC_PLLCFGR_PLLP_Pos)   /* 00 = PLLP=2 */
@@ -114,11 +113,9 @@ static void clock_init(void)
     RCC->CR |= RCC_CR_PLLON;
     while (!(RCC->CR & RCC_CR_PLLRDY));
 
-    /* Switch system clock to PLL */
     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_PLL;
     while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
 
-    /* SysTick: 1ms @ 168MHz */
     SysTick->LOAD = 168000 - 1;
     SysTick->VAL  = 0;
     SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk
@@ -135,43 +132,100 @@ static void gpio_init(void)
 }
 
 /* ========================================================================
- * Firmware validation & jump
+ * CRC32 (reflected, poly 0xEDB88320) — used for slot integrity + compare
  * ======================================================================== */
 
-static int firmware_is_valid(void)
+static uint32_t crc32_table[256];
+static int crc32_ready = 0;
+
+static void crc32_init(void)
 {
-    uint32_t sp = *(uint32_t *)APP_BASE;
-    uint32_t pc = *(uint32_t *)(APP_BASE + 4);
-    if (sp < 0x20000000 || sp > 0x20020000) return 0;  /* SRAM 128KB */
-    if (pc < APP_BASE   || pc >= APP_END)   return 0;
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int j = 0; j < 8; j++)
+            c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        crc32_table[i] = c;
+    }
+    crc32_ready = 1;
+}
+
+static uint32_t crc32(const uint8_t *data, uint32_t len)
+{
+    if (!crc32_ready) crc32_init();
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < len; i++)
+        crc = crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+/* ========================================================================
+ * Slot helpers
+ * ======================================================================== */
+
+/* An erased (never-written) slot starts with 0xFFFFFFFF. */
+static int slot_empty(uint32_t base)
+{
+    return (*(volatile uint32_t*)base == 0xFFFFFFFFu);
+}
+
+/* A bootable firmware has sane SP (in 128KB SRAM) and PC (inside the slot). */
+static int vector_ok(uint32_t base)
+{
+    uint32_t sp = *(volatile uint32_t*)base;
+    uint32_t pc = *(volatile uint32_t*)(base + 4);
+    if (sp < 0x20000000u || sp > 0x20020000u) return 0;
+    if (pc < base || pc >= base + FW_SIZE)    return 0;
     return 1;
 }
 
-/* Hand the APP a clean clock state before jumping (see note below). */
+/* Erase `dst`'s sectors, then copy FW_SIZE bytes from `src`. */
+static void copy_slot(uint32_t dst, uint32_t src)
+{
+    int first, last;
+    if (dst == APP1_BASE) { first = APP1_FIRST_SECTOR; last = APP1_LAST_SECTOR; }
+    else                  { first = APP2_FIRST_SECTOR; last = APP2_LAST_SECTOR; }
+
+    static uint32_t buf[256];   /* 1 KB transfer buffer */
+    flash_erase_sectors(first, last);
+    for (uint32_t off = 0; off < FW_SIZE; off += sizeof(buf)) {
+        memcpy(buf, (const void*)(src + off), sizeof(buf));
+        flash_write_words(dst + off, buf, sizeof(buf) / 4);
+    }
+}
+
+/* ========================================================================
+ * Boot metadata (S1)
+ * ======================================================================== */
+
+static void meta_load(boot_meta_t *m)
+{
+    const boot_meta_t *p = (const boot_meta_t*)BOOT_META_BASE;
+    if (p->magic == BOOT_META_MAGIC) *m = *p;
+    else { memset(m, 0, sizeof(*m)); m->magic = BOOT_META_MAGIC; }
+}
+
+static void meta_store(const boot_meta_t *m)
+{
+    flash_erase_sectors(BOOT_META_SECTOR, BOOT_META_SECTOR);
+    flash_write_words(BOOT_META_BASE, (const uint32_t*)m, sizeof(boot_meta_t) / 4);
+}
+
+/* ========================================================================
+ * Jump to APP
+ * ======================================================================== */
+
 static void clock_switch_to_hsi(void)
 {
-    /* 1. ensure HSI (16MHz) is on and stable */
     RCC->CR |= RCC_CR_HSION;
     while (!(RCC->CR & RCC_CR_HSIRDY));
 
-    /* 2. switch SYSCLK back to HSI (SW=00) */
     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_HSI;
     while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_HSI);
 
-    /* 3. stop the PLL so the APP can reconfigure it from scratch */
     RCC->CR &= ~RCC_CR_PLLON;
     while (RCC->CR & RCC_CR_PLLRDY);
 }
 
-/*
- * Why reset the clock before jumping:
- * The APP's SystemClock_Config() is HSI-only (PLLSRC=HSI, M=16), but this
- * bootloader may have left SYSCLK = PLL-from-HSE (M=8). In that state the
- * APP's HAL_RCC_OscConfig() takes the "SYSCLK==PLL" branch and, seeing a
- * PLLSRC/M mismatch, returns HAL_ERROR -> Error_Handler() dead loop (the
- * symptom: boot says "jump ok" but the APP LED never blinks). Switching back
- * to HSI first makes the APP take the normal "reconfigure PLL" path.
- */
 __attribute__((noreturn))
 static void jump_to_app(uint32_t addr)
 {
@@ -184,24 +238,6 @@ static void jump_to_app(uint32_t addr)
     __set_MSP(sp);
     ((void (*)(void))pc)();
     while (1);
-}
-
-/* ========================================================================
- * OTA via Ymodem (UART1)
- * ======================================================================== */
-
-static void ota_ymodem(int can_fallback)
-{
-    ymodem_uart_init();
-    while (1) {
-        int fw_size = ymodem_receive(APP_BASE, APP_SIZE);
-        if (fw_size > 0) {
-            for (int i = 0; i < 3; i++) blink(200);
-            jump_to_app(APP_BASE);
-        }
-        if (can_fallback && firmware_is_valid()) jump_to_app(APP_BASE);
-        blink(100); blink(100);
-    }
 }
 
 /* ========================================================================
@@ -236,14 +272,17 @@ static void tcp_putc(int c)
     USART2->DR = (uint8_t)c;
 }
 
-/* TCP Ymodem receiver (128-byte SOH packets, CRC16, EOT handshake) */
+/* TCP Ymodem receiver.  APP1 must already be erased by the caller.
+ * Returns bytes written, or -1 on error / first-packet timeout. */
 static int tcp_ymodem_receive(uint32_t flash_addr, uint32_t max_size)
 {
-    int offset = 0, first = 1, erased = 0;
+    int offset = 0, first = 1;
     uint8_t buf[1024];
 
-    /* phase 1: send 'C' until sender responds */
+    /* phase 1: send 'C' until the sender responds (15s deadline) */
+    uint32_t start = _ym_ms;
     while (1) {
+        if ((_ym_ms - start) >= OTA_FIRST_PKT_TIMEOUT) return -1;
         tcp_putc('C');
         int h = -1;
         { uint32_t ts = _ym_ms;
@@ -268,10 +307,6 @@ static int tcp_ymodem_receive(uint32_t flash_addr, uint32_t max_size)
             if (calc != recv) { tcp_putc(0x15); continue; }
             for (int i = 0; i < dlen; i++) buf[i] = raw[3+i];
             if (offset + dlen <= (int)max_size) {
-                if (!erased) {
-                    flash_erase_sectors(APP_FIRST_SECTOR, APP_LAST_SECTOR);
-                    erased = 1;
-                }
                 flash_write_bytes(flash_addr + offset, buf, dlen);
                 offset += dlen;
             }
@@ -335,10 +370,6 @@ static int tcp_ymodem_receive(uint32_t flash_addr, uint32_t max_size)
             if (calc != recv) { tcp_putc(0x15); continue; }
             for (int i = 0; i < dlen; i++) buf[i] = raw3[3+i];
             if (offset + dlen <= (int)max_size) {
-                if (!erased) {
-                    flash_erase_sectors(APP_FIRST_SECTOR, APP_LAST_SECTOR);
-                    erased = 1;
-                }
                 flash_write_bytes(flash_addr + offset, buf, dlen);
                 offset += dlen;
             }
@@ -372,8 +403,7 @@ static int tcp_ota(void)
         if(!pc_ip[0]) return -1;
     }
 
-    /* 3. erase APP flash, cleanup */
-    flash_erase_sectors(APP_FIRST_SECTOR, APP_LAST_SECTOR);
+    /* 3. close any stale connections (APP1 already erased by caller) */
     at_cmd("AT+CIPSERVER=0\r\n","OK",1000);
     for(int lid=0;lid<5;lid++){
         char cb[32],*p=cb;
@@ -403,7 +433,7 @@ static int tcp_ota(void)
     { char d[64]; esp_recv(d,sizeof(d),500,100); }  /* drain prompt */
     for(;;){ int c=-1; __disable_irq(); if(_rb_r!=_rb_w){c=_rb[_rb_r];_rb_r=(_rb_r+1)%RB_SZ;} __enable_irq(); if(c<0&&(USART2->SR&USART_SR_RXNE))c=(int)(USART2->DR&0xFF); if(c<0)break; }
 
-    offset = tcp_ymodem_receive(APP_BASE, APP_SIZE);
+    offset = tcp_ymodem_receive(APP1_BASE, FW_SIZE);
 
     /* exit transparent, restore settings */
     NVIC_DisableIRQ(USART2_IRQn); delay_ms(1000);
@@ -415,10 +445,201 @@ static int tcp_ota(void)
     /* restart ESP so APP sees a clean module */
     esp_send_str("AT+RST\r\n");
     delay_ms(1000);
-    /* strip trailing Ymodem Ctrl-Z (0x1A) padding */
-    while(offset>0 && *((uint8_t*)APP_BASE+offset-1)==0x1A) offset--;
 
     return offset > 0 ? offset : -1;
+}
+
+/* ========================================================================
+ * OTA flow (A/B)
+ * ======================================================================== */
+
+/* Erase APP1 and record "flashing" in meta, so a power-loss mid-OTA is
+ * recoverable on the next boot (restore from APP2). */
+static void begin_flash_app1(void)
+{
+    boot_meta_t meta;
+    meta_load(&meta);
+    meta.app1_crc = 0;
+    meta.state = BOOT_STATE_FLASHING_APP1;
+    meta_store(&meta);
+    flash_erase_sectors(APP1_FIRST_SECTOR, APP1_LAST_SECTOR);
+}
+
+/* Receive one firmware image into APP1.  Returns 1 on a valid image. */
+static int receive_firmware(int is_wifi)
+{
+    int fw;
+    if (is_wifi) fw = tcp_ota();
+    else { ymodem_uart_init(); fw = ymodem_receive(APP1_BASE, FW_SIZE); }
+    return (fw > 0) && vector_ok(APP1_BASE);
+}
+
+/* APP1 is valid: copy APP1 -> APP2, persist CRCs, jump. */
+static void commit_app1(void)
+{
+    boot_meta_t meta;
+    uint32_t c = crc32((const uint8_t*)APP1_BASE, FW_SIZE);
+
+    OLED_ShowString(2, 1, "Commit A1->A2");
+
+    meta_load(&meta);
+    meta.app1_crc = c;
+    meta.state = BOOT_STATE_COMMIT_APP2;
+    meta_store(&meta);
+
+    copy_slot(APP2_BASE, APP1_BASE);
+
+    meta.app2_crc = c;
+    meta.state = BOOT_STATE_NORMAL;
+    meta_store(&meta);
+
+    OLED_ShowString(3, 1, "OTA OK");
+    for (int i = 0; i < 3; i++) blink(200);
+    jump_to_app(APP1_BASE);
+}
+
+/* Restore APP1 from APP2 (rollback after a failed OTA), jump. */
+static void restore_backup(void)
+{
+    boot_meta_t meta;
+    meta_load(&meta);
+
+    OLED_ShowString(3, 1, "Restore A1<-A2");
+
+    copy_slot(APP1_BASE, APP2_BASE);
+
+    meta.app1_crc = meta.app2_crc;
+    meta.state = BOOT_STATE_NORMAL;
+    meta_store(&meta);
+
+    jump_to_app(APP1_BASE);
+}
+
+/* No valid firmware anywhere: wait forever for a serial Ymodem transfer. */
+static void serial_ota_wait(void)
+{
+    while (1) {
+        OLED_ShowString(2, 1, "Wait Ymodem");
+        begin_flash_app1();
+        int fw = ymodem_receive(APP1_BASE, FW_SIZE);
+        if (fw > 0 && vector_ok(APP1_BASE)) {
+            commit_app1();   /* copy APP1 -> APP2, then jump */
+        }
+        OLED_ShowString(3, 1, "Transfer fail");
+        blink(100); blink(100);
+    }
+}
+
+static void ota_flow(int is_wifi)
+{
+    boot_meta_t meta;
+    meta_load(&meta);
+    int has_backup = (meta.app2_crc != 0) && vector_ok(APP2_BASE);
+
+    if (is_wifi) OLED_ShowString(1, 1, "OTA WiFi");
+    else         OLED_ShowString(1, 1, "OTA Serial");
+
+    begin_flash_app1();
+
+    if (receive_firmware(is_wifi)) {
+        commit_app1();   /* copy APP1 -> APP2, then jump */
+    }
+
+    OLED_ShowString(2, 1, "OTA FAIL");
+
+    if (has_backup) {
+        restore_backup();   /* APP1 <- APP2, then jump */
+    }
+
+    /* No backup to roll back to: keep waiting for a valid serial transfer. */
+    serial_ota_wait();
+}
+
+/* ========================================================================
+ * Normal boot: recover interrupted OTA, then enforce the 4 sync rules.
+ * Jumps to APP1 if bootable; returns (falls through) when no firmware.
+ * ======================================================================== */
+
+static void boot_check_and_run(void)
+{
+    boot_meta_t meta;
+    meta_load(&meta);
+
+    /* ---- recover interrupted OTA (power loss) ---- */
+    if (meta.state == BOOT_STATE_FLASHING_APP1) {
+        if (meta.app2_crc != 0 && vector_ok(APP2_BASE)) {
+            OLED_ShowString(2, 1, "Recover A1<-A2");
+            copy_slot(APP1_BASE, APP2_BASE);
+            meta.app1_crc = meta.app2_crc;
+        }
+        meta.state = BOOT_STATE_NORMAL;
+        meta_store(&meta);
+    } else if (meta.state == BOOT_STATE_COMMIT_APP2) {
+        if (vector_ok(APP1_BASE)) {
+            uint32_t c = crc32((const uint8_t*)APP1_BASE, FW_SIZE);
+            OLED_ShowString(2, 1, "Commit A1->A2");
+            copy_slot(APP2_BASE, APP1_BASE);
+            meta.app1_crc = c;
+            meta.app2_crc = c;
+        }
+        meta.state = BOOT_STATE_NORMAL;
+        meta_store(&meta);
+    }
+
+    /* ---- slot states ---- */
+    int v1 = !slot_empty(APP1_BASE) && vector_ok(APP1_BASE);
+    int v2 = !slot_empty(APP2_BASE) && vector_ok(APP2_BASE);
+
+    /* ---- 4 rules ---- */
+    if (!v1 && v2) {
+        /* APP1 empty/invalid, APP2 valid: restore */
+        OLED_ShowString(2, 1, "A1<-A2 restore");
+        copy_slot(APP1_BASE, APP2_BASE);
+        meta.app1_crc = meta.app2_crc;
+        meta_store(&meta);
+        v1 = 1;
+    } else if (v1 && !v2) {
+        /* APP1 valid, APP2 empty: back it up */
+        OLED_ShowString(2, 1, "A2<-A1 backup");
+        uint32_t c = crc32((const uint8_t*)APP1_BASE, FW_SIZE);
+        copy_slot(APP2_BASE, APP1_BASE);
+        meta.app1_crc = c;
+        meta.app2_crc = c;
+        meta_store(&meta);
+    } else if (v1 && v2) {
+        uint32_t c1 = crc32((const uint8_t*)APP1_BASE, FW_SIZE);
+        if (meta.app1_crc != 0 && meta.app2_crc != 0 && meta.app1_crc == meta.app2_crc) {
+            /* stored CRCs agree — just verify APP1 integrity */
+            if (c1 != meta.app1_crc) {
+                OLED_ShowString(2, 1, "A1 bad restore");
+                copy_slot(APP1_BASE, APP2_BASE);
+                meta.app1_crc = meta.app2_crc;
+                meta_store(&meta);
+            }
+        } else {
+            /* CRCs unknown or disagree — full compare (APP2 authoritative) */
+            uint32_t c2 = crc32((const uint8_t*)APP2_BASE, FW_SIZE);
+            if (c1 != c2) {
+                OLED_ShowString(2, 1, "A1 diff restore");
+                copy_slot(APP1_BASE, APP2_BASE);
+                meta.app1_crc = c2;
+                meta.app2_crc = c2;
+                meta_store(&meta);
+            } else {
+                meta.app1_crc = c1;
+                meta.app2_crc = c2;
+                meta.state = BOOT_STATE_NORMAL;
+                meta_store(&meta);
+            }
+        }
+    }
+
+    /* ---- boot APP1 ---- */
+    if (v1 && vector_ok(APP1_BASE)) {
+        OLED_ShowString(2, 1, "APP1 start");
+        jump_to_app(APP1_BASE);
+    }
+    /* no firmware: return so the caller can wait for OTA */
 }
 
 /* ========================================================================
@@ -431,23 +652,16 @@ void Reset_Handler(void)
     unsigned int *end = &Image$$RW_IRAM1$$ZI$$Limit;
     while (bss < end) *bss++ = 0;
 
-    /* Init LED GPIO BEFORE clock — proves code runs even if clock hangs */
     gpio_init();
-
-    /* Brief LED pulse: bootloader is alive */
     led(1); for (volatile int i = 0; i < 100000; i++);  /* ~quick flash */
     led(0);
 
     clock_init();
-
-    /* Init UART early so the OLED probe result can be printed */
     ymodem_uart_init();
 
-    /* ---- boot-check display on OLED ---- */
     OLED_Init();
     OLED_ShowString(1, 1, "BOOT CHECK");
 
-    /* Report which slave address (if any) answered the ACK */
     if      (oled_probe_result == 1) uart_puts("OLED: 0x78 ACK\r\n");
     else if (oled_probe_result == 2) uart_puts("OLED: 0x7A ACK\r\n");
     else                             uart_puts("OLED: NONE\r\n");
@@ -458,36 +672,20 @@ void Reset_Handler(void)
     uint32_t ota_flag = RTC->BKP0R;
     RTC->BKP0R = 0;  /* clear immediately so reboot doesn't re-enter OTA */
 
-    if (ota_flag == OTA_FLAG_DONE) {
-        OLED_ShowString(2, 1, "FW valid, jump");
-        if (firmware_is_valid()) jump_to_app(APP_BASE);
-    }
-
     if (ota_flag == OTA_FLAG_SERIAL) {
-        OLED_ShowString(2, 1, "OTA: Serial");
-        OLED_ShowString(3, 1, "Waiting Ymodem..");
         for (int i = 0; i < 3; i++) blink(100);
-        ota_ymodem(1);
+        ota_flow(0);
     }
 
     if (ota_flag == OTA_FLAG_WIFI) {
-        OLED_ShowString(2, 1, "OTA: WiFi TCP");
         for (int i = 0; i < 3; i++) blink(100);
-        int fw = tcp_ota();
-        if (fw > 0) {
-            OLED_ShowString(2, 1, "OTA done, jump");
-            for (int i = 0; i < 3; i++) blink(200);
-            jump_to_app(APP_BASE);
-        }
-        ota_ymodem(1);
+        ota_flow(1);
     }
 
-    if (firmware_is_valid()) {
-        OLED_ShowString(2, 1, "FW OK, start APP");
-        for(int i=0;i<2;i++){led(1);delay_ms(100);led(0);delay_ms(100);}
-        jump_to_app(APP_BASE);
-    }
+    /* Normal boot: enforce A/B rules and jump if APP1 is bootable. */
+    boot_check_and_run();
+
+    /* No firmware anywhere: wait for the first-ever serial transfer. */
     OLED_ShowString(2, 1, "No FW, OTA mode");
-    for(int i=0;i<3;i++){led(1);delay_ms(100);led(0);delay_ms(100);}
-    ota_ymodem(0);
+    serial_ota_wait();
 }

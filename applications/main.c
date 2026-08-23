@@ -12,7 +12,7 @@
 #include "oled/OLED.h"
 #include "wifi_config.h"
 
-#define APP_FLASH_BASE  0x08005000  /* must match APP_BASE in partition.h */
+#define APP_FLASH_BASE  0x0800C000  /* must match APP1_BASE in partition.h */
 #define LED0_PIN        GET_PIN(A, 1)
 
 /* LED0 is active-low (PA1): LOW lights it */
@@ -62,7 +62,7 @@ void shell_led_blink(void)
 int main(void)
 {
     /*
-     * Bootloader sets VTOR = 0x08005000.  SystemInit() does NOT touch VTOR
+     * Bootloader sets VTOR = 0x0800C000.  SystemInit() does NOT touch VTOR
      * on this BSP (USER_VECT_TAB_ADDRESS is not defined), so the bootloader's
      * setting persists.  Set it again here as a safeguard.
      */

@@ -3,6 +3,7 @@ import socket, sys, os, time, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PORT = 8888
+APP_SIZE = 208 * 1024   # must match FW_SIZE in bootloader/partition.h
 
 def find_esp():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -51,6 +52,10 @@ def main():
     bin_path = pick_bin()
     if not bin_path: print("No .bin file found!"); sys.exit(1)
     data = open(bin_path, 'rb').read()
+    if len(data) > APP_SIZE:
+        print(f"ERROR: firmware {len(data)/1024:.1f} KB exceeds APP partition "
+              f"({APP_SIZE/1024:.0f} KB). Trim code or reduce features.")
+        sys.exit(1)
     print(f"Firmware: {os.path.basename(bin_path)} ({len(data)/1024:.1f} KB)")
 
     # Load last-used IP from file

@@ -9,7 +9,9 @@ if not os.path.exists(hex_file):
     print(f'{hex_file} not found. Build first.')
     sys.exit(1)
 
-data = bytearray(54 * 1024)
+APP_BASE = 0x0800C000     # must match APP1_BASE in bootloader/partition.h
+APP_SIZE = 208 * 1024     # must match FW_SIZE in bootloader/partition.h
+data = bytearray(APP_SIZE)
 ext_addr = 0
 base_addr = None
 pairs = []
@@ -33,6 +35,10 @@ with open(hex_file) as f:
 if base_addr is None:
     print('No data!')
     sys.exit(1)
+
+if base_addr != APP_BASE:
+    print(f'WARNING: hex base 0x{base_addr:08X} != APP_BASE 0x{APP_BASE:08X} '
+          f'(bootloader/partition.h)')
 
 max_off = 0
 for addr, val in pairs:

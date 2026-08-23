@@ -1,4 +1,4 @@
-; Minimal startup for bare-metal blink test @ 0x08005000
+; Minimal startup for bare-metal blink test @ 0x0800C000
 ; Same layout as APP — bootloader reads SP/PC from vector table here.
 
 Stack_Size      EQU     0x00000400
@@ -10,7 +10,7 @@ __initial_sp
                 PRESERVE8
                 THUMB
 
-; Vector table — placed at 0x08005000 by scatter file (+First)
+; Vector table — placed at 0x0800C000 by scatter file (+First)
                 AREA    RESET, DATA, READONLY
                 EXPORT  __Vectors
                 EXPORT  __Vectors_End
@@ -43,7 +43,7 @@ Reset_Handler   PROC
                 IMPORT  main
 
                 ; Minimal SystemInit — enable FPU, set VTOR
-                LDR     R0, =0x08005000
+                LDR     R0, =0x0800C000
                 LDR     R1, =0xE000ED08          ; SCB->VTOR
                 STR     R0, [R1]
 

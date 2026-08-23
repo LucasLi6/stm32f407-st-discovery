@@ -1,15 +1,22 @@
 /*
  * Flash partition layout — shared between bootloader and application.
  *
- * STM32F407VET6  512 KB flash, sector size varies (16K/64K/128K)
+ * STM32F407VET6  512 KB flash, sector sizes: 16/16/16/16/64/128/128/128 KB
  *
- *  ┌─────────────── 0x08000000  Sector 0 (16KB)
- *  │  Bootloader    20 KB
- *  ├─────────────── 0x08005000  Sectors 1~5 + sector 6 partial
- *  │  Application  240 KB
- *  ├─────────────── 0x08041000
- *  │  (free)       252 KB       Sector 6(116KB) + Sector 7
+ *  ┌─────────────── 0x08000000  S0       16 KB   Bootloader code
+ *  ├─────────────── 0x08004000  S1       16 KB   Boot meta (slot CRC + OTA state)
+ *  ├─────────────── 0x08008000  S2       16 KB   Config (WiFi/mode/OTA-server)
+ *  ├─────────────── 0x0800C000  S3~S5   208 KB   APP1  (primary, always booted)
+ *  ├─────────────── 0x08040000  S6~S7   256 KB   APP2  (backup copy)
  *  └─────────────── 0x08080000
+ *
+ * Firmware image is always FW_SIZE (= APP1_SIZE = 208 KB).  APP2 is larger
+ * (256 KB) but only its first FW_SIZE bytes are copied / validated, so a
+ * restore (APP2 -> APP1) is always safe as long as firmware <= FW_SIZE.
+ *
+ * Sector boundaries are chosen so every region is a whole number of sectors:
+ * no region shares a sector with its neighbour, so each can be erased
+ * independently.
  */
 
 #ifndef __PARTITION_H__
@@ -44,36 +51,48 @@
 
 /* ---- partitions ---- */
 #define BOOTLOADER_BASE              FLASH_BASE
-#define BOOTLOADER_SIZE              (20 * 1024)
-#define BOOTLOADER_END               (BOOTLOADER_BASE + BOOTLOADER_SIZE)
+#define BOOTLOADER_SIZE              (16 * 1024)          /* S0 only */
 
-#define APP_BASE                     ((uint32_t)0x08005000)
-#define APP_SIZE                     (240 * 1024)
-#define APP_END                      (APP_BASE + APP_SIZE)
+#define BOOT_META_BASE               FLASH_SECTOR_1_BASE  /* S1 */
+#define BOOT_META_SIZE               FLASH_SECTOR_1_SIZE
+#define BOOT_META_SECTOR             1
 
-/* APP erase: sectors 1~6 (sector 1 partial + 2/3/4/5 full + sector 6 partial) */
-#define APP_FIRST_SECTOR             1
-#define APP_LAST_SECTOR              6
+#define CONFIG_BASE                  FLASH_SECTOR_2_BASE  /* S2 */
+#define CONFIG_SIZE                  FLASH_SECTOR_2_SIZE
+#define CONFIG_SECTOR                2
 
-#define WIFI_CONFIG_BASE             FLASH_SECTOR_7_BASE
-#define WIFI_CONFIG_SIZE             (2 * 1024)
+#define APP1_BASE                    FLASH_SECTOR_3_BASE  /* 0x0800C000 */
+#define APP1_SIZE                    (208 * 1024)         /* S3+S4+S5 */
+#define APP1_END                     (APP1_BASE + APP1_SIZE)
+#define APP1_FIRST_SECTOR            3
+#define APP1_LAST_SECTOR             5
 
-/* ---- WiFi credential entry (mirrors wifi_config.c layout) ---- */
-#define WIFI_ENTRY_SIZE              128
-#define WIFI_ENTRY_COUNT             16
-#define WIFI_MAGIC_VALID             0xA5A5A5A5
-#define WIFI_SSID_MAX                32
-#define WIFI_PASS_MAX                64
+#define APP2_BASE                    FLASH_SECTOR_6_BASE  /* 0x08040000 */
+#define APP2_SIZE                    (256 * 1024)         /* S6+S7 */
+#define APP2_FIRST_SECTOR            6
+#define APP2_LAST_SECTOR             7
+
+/* Canonical firmware image size == APP1_SIZE.  APP2's extra 48 KB are spare. */
+#define FW_SIZE                      APP1_SIZE
+#define FW_END                       (APP1_BASE + FW_SIZE)
+
+/* ---- boot metadata (stored at BOOT_META_BASE in S1) ---- */
+#define BOOT_META_MAGIC              0x4D455441UL  /* "META" */
+
+/* OTA progress state (persisted so a power-loss mid-OTA is recoverable). */
+#define BOOT_STATE_NORMAL            0   /* both slots committed */
+#define BOOT_STATE_FLASHING_APP1     1   /* erasing/writing APP1 (uncommitted) */
+#define BOOT_STATE_COMMIT_APP2       2   /* APP1 valid, need copy APP1 -> APP2 */
 
 typedef struct {
-    uint32_t magic;          /* 0x00: WIFI_MAGIC_VALID */
-    int32_t  priority;       /* 0x04: 1-based, 0=empty */
-    char     ssid[32];       /* 0x08 */
-    char     password[64];   /* 0x28 */
-    char     reserved[24];   /* 0x68: pad to 128 */
-} wifi_entry_t;
+    uint32_t magic;        /* BOOT_META_MAGIC */
+    uint32_t app1_crc;     /* CRC32 over APP1[0..FW_SIZE); 0 = no valid fw */
+    uint32_t app2_crc;     /* CRC32 over APP2[0..FW_SIZE); 0 = no valid fw */
+    uint32_t state;        /* BOOT_STATE_* */
+    uint32_t reserved[4];
+} boot_meta_t;
 
 /* ---- convenience ---- */
-#define APP_VTOR                     APP_BASE
+#define APP_VTOR                     APP1_BASE
 
 #endif /* __PARTITION_H__ */

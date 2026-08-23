@@ -1,11 +1,11 @@
 ; *************************************************************
 ; *** Bootloader Scatter File (ARMCC)
-; *** Base: 0x08000000  Size: 6 KB (0x1800)
+; *** Base: 0x08000000  Size: 16 KB (0x4000) — S0 only
 ; *************************************************************
 
-; Bootloader 20KB + 20KB RAM
-LR_IROM1 0x08000000 0x00005000  {
-  ER_IROM1 0x08000000 0x00005000  {
+; Bootloader 16KB (S0) + 20KB RAM
+LR_IROM1 0x08000000 0x00004000  {
+  ER_IROM1 0x08000000 0x00004000  {
    *.o (RESET, +First)
    .ANY (+RO)
   }

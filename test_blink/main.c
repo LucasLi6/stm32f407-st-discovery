@@ -1,5 +1,5 @@
 /*
- * Bare-metal LED blink — 0x08005000
+ * Bare-metal LED blink — 0x0800C000
  * Zero dependencies: no HAL, no RT-Thread, no SDK headers.
  */
 
@@ -24,7 +24,7 @@ int main(void);
 
 int main(void)
 {
-    SCB_VTOR  = 0x08005000U;          /* vector table at APP base */
+    SCB_VTOR  = 0x0800C000U;          /* vector table at APP base */
     SCB_CPACR |= (0xFU << 20);        /* enable FPU */
 
     RCC_AHB1ENR |= RCC_AHB1ENR_GPIOAEN;  /* GPIOA clock on */

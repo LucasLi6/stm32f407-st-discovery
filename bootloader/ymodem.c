@@ -6,6 +6,7 @@
 #include "ymodem.h"
 #include "flash_ops.h"
 #include "partition.h"
+#include "ota_config.h"
 #include <stm32f4xx.h>
 
 void ymodem_uart_init(void)
@@ -111,13 +112,16 @@ static int read_pkt(int typ, uint8_t *out, int *seq_out)
 
 int ymodem_receive(uint32_t flash_addr, uint32_t max_size)
 {
-    int offset = 0, first = 1, erased = 0;
+    int offset = 0, first = 1;
     uint8_t buf[1024];
 
     /*
      * Phase 1: send 'C' until sender responds with a packet.
+     * Give up after OTA_FIRST_PKT_TIMEOUT (15s) with no first packet.
      */
+    uint32_t start = _ym_ms;
     while (1) {
+        if ((_ym_ms - start) >= OTA_FIRST_PKT_TIMEOUT) return -1;  /* 15s no first packet */
         ymodem_putc(CRC16);
         int h = wait_hdr(1000);
         if (h == SOH || h == STX) {
@@ -125,7 +129,6 @@ int ymodem_receive(uint32_t flash_addr, uint32_t max_size)
             if (n < 0) { ymodem_putc(NAK); continue; }   // blink: bad pkt
             if (n == 0) { ymodem_putc(ACK); continue; }  // blink: final
             if (offset + n <= (int)max_size) {
-                if (!erased) { flash_erase_sectors(APP_FIRST_SECTOR, APP_LAST_SECTOR); erased = 1; }
                 flash_write_bytes(flash_addr + offset, buf, n);
                 offset += n;
             }
@@ -166,7 +169,6 @@ int ymodem_receive(uint32_t flash_addr, uint32_t max_size)
             if (n < 0) { ymodem_putc(NAK); continue; }
             if (n == 0) { ymodem_putc(ACK); continue; }
             if (offset + n <= (int)max_size) {
-                if (!erased) { flash_erase_sectors(APP_FIRST_SECTOR, APP_LAST_SECTOR); erased = 1; }
                 flash_write_bytes(flash_addr + offset, buf, n);
                 offset += n;
             }
