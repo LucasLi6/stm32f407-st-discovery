@@ -11,6 +11,9 @@
 #include "../oled/OLED.h"
 #include "../wifi_config.h"
 #include "../esp8266/esp8266.h"
+#include "../hardware/pca9685.h"
+#include "../hardware/relay.h"
+#include "../hardware/pushrod.h"
 
 extern void shell_led_on(void);
 extern void shell_led_off(void);
@@ -160,6 +163,10 @@ static void cmd_help(int argc, char **argv)
     shell_write("  wifi delete   - delete WiFi by priority\r\n");
     shell_write("  wifi exc      - swap two WiFi priorities\r\n");
     shell_write("  wifi mode     - set mode: sta | ap [ssid] [pass]\r\n");
+    shell_write("  MP <UP|DOWN> [ms] - push rod up/down; ms 0..20000, omit = continuous\r\n");
+    shell_write("  MP OFF          - all relays off\r\n");
+    shell_write("  MP STOP         - interrupt a timed move\r\n");
+    shell_write("  hardware      - servo/relay control help\r\n");
     shell_write("\r\n");
 }
 
@@ -335,6 +342,123 @@ static void cmd_wifi(int argc, char **argv)
     }
 }
 
+/* servo: S<n> <deg>, n=0..15 (num = PCA9685 channel, already validated 0..15) */
+static void cmd_servo(int argc, char **argv, int num)
+{
+    if (argc < 2) {
+        shell_write("Usage: S<n> <deg>   (deg 0-180, 90=stop)\r\n");
+        return;
+    }
+    int deg = atoi(argv[1]);
+    if (deg < 0) deg = 0;
+    if (deg > PCA9685_SERVO_MAX_DEG) deg = PCA9685_SERVO_MAX_DEG;
+
+    servo_set_angle((uint8_t)num, (uint16_t)deg);
+
+    char buf[48];
+    rt_snprintf(buf, sizeof(buf), "Servo %d -> %d deg\r\n", num, deg);
+    shell_write(buf);
+}
+
+/* relay: RL<n> ON|OFF, n=1..5 (num passed in, already validated 1..8) */
+static void cmd_relay(int argc, char **argv, int num)
+{
+    int on;
+    if (num == 6 || num == 7 || num == 8) {
+        shell_write("RL6-8 are reserved for the push rod (H-bridge).\r\n");
+        shell_write("Use: MP <UP|DOWN> [ms] | MP OFF | MP STOP\r\n");
+        return;
+    }
+    if (argc < 2) {
+        shell_write("Usage: RL<n> ON|OFF\r\n");
+        return;
+    }
+    if      (rt_strcmp(argv[1], "ON")  == 0 || rt_strcmp(argv[1], "on")  == 0) on = 1;
+    else if (rt_strcmp(argv[1], "OFF") == 0 || rt_strcmp(argv[1], "off") == 0) on = 0;
+    else {
+        shell_write("Usage: RL<n> ON|OFF\r\n");
+        return;
+    }
+
+    relay_set(num, on);
+
+    char buf[48];
+    rt_snprintf(buf, sizeof(buf), "Relay %d %s\r\n", num, on ? "ON" : "OFF");
+    shell_write(buf);
+}
+
+/* push rod: MP <UP|DOWN> [ms] | MP OFF | MP STOP — linear actuator via relays 6-8 (H-bridge) */
+static void cmd_pushrod(int argc, char **argv)
+{
+    if (argc < 2) {
+        shell_write("Usage: MP <UP|DOWN> [ms]\r\n");
+        shell_write("       MP OFF  - all relays off (power + direction)\r\n");
+        shell_write("       MP STOP - interrupt a timed move (cut power)\r\n");
+        shell_write("       ms      - optional; timed move 0..20000 ms, omit = continuous\r\n");
+        return;
+    }
+
+    if (rt_strcmp(argv[1], "OFF") == 0 || rt_strcmp(argv[1], "off") == 0) {
+        pushrod_off();
+        shell_write("Pushrod off\r\n");
+        return;
+    }
+
+    if (rt_strcmp(argv[1], "STOP") == 0 || rt_strcmp(argv[1], "stop") == 0) {
+        pushrod_stop();
+        shell_write("Pushrod stop\r\n");
+        return;
+    }
+
+    int dir;
+    if      (rt_strcmp(argv[1], "UP")   == 0 || rt_strcmp(argv[1], "up")   == 0) dir = PUSHROD_UP;
+    else if (rt_strcmp(argv[1], "DOWN") == 0 || rt_strcmp(argv[1], "down") == 0) dir = PUSHROD_DOWN;
+    else {
+        shell_write("Usage: MP <UP|DOWN> [ms]\r\n");
+        return;
+    }
+
+    char buf[64];
+
+    /* continuous: just set the relay state (no timing, never "busy") */
+    if (argc < 3) {
+        pushrod_set(dir);
+        rt_snprintf(buf, sizeof(buf), "Pushrod %s (continuous)\r\n",
+                    (dir == PUSHROD_UP) ? "UP" : "DOWN");
+        shell_write(buf);
+        return;
+    }
+
+    /* timed move */
+    int m = atoi(argv[2]);
+    if (m < 0) m = 0;
+    if (m > PUSHROD_MAX_MS) m = PUSHROD_MAX_MS;
+
+    if (pushrod_move(dir, (uint32_t)m) != 0) {
+        shell_write("Pushrod busy (a timed move is running; 'MP STOP' first)\r\n");
+        return;
+    }
+
+    rt_snprintf(buf, sizeof(buf), "Pushrod %s %dms\r\n",
+                (dir == PUSHROD_UP) ? "UP" : "DOWN", m);
+    shell_write(buf);
+}
+
+static void cmd_hardware(int argc, char **argv)
+{
+    shell_write("\r\n");
+    shell_write("  === Hardware Control ===\r\n");
+    shell_write("  S<n> <deg>     - servo n (0-15), 0-180 deg (90=stop for 360)\r\n");
+    shell_write("                   e.g.  S0 90\r\n");
+    shell_write("  RL<n> ON|OFF   - relay n (1-5) enable/disable\r\n");
+    shell_write("                   e.g.  RL1 ON  (RL6-8 = push rod H-bridge)\r\n");
+    shell_write("  MP <UP|DOWN> [ms] - push rod: up/down (relays 6-8)\r\n");
+    shell_write("                   e.g.  MP UP 1000  (0..20000 ms; omit = continuous)\r\n");
+    shell_write("  MP OFF            - all relays off\r\n");
+    shell_write("  MP STOP           - interrupt a timed move\r\n");
+    shell_write("\r\n");
+}
+
 static const struct shell_cmd _table[] = {
     {"help",  "show help",       cmd_help},
     {"led",   "led <on|off|blink>", cmd_led},
@@ -344,6 +468,7 @@ static const struct shell_cmd _table[] = {
     {"who",   "connections",     cmd_who},
     {"oled",  "oled <line> <text>", cmd_oled},
     {"wifi",  "wifi save/show/delete", cmd_wifi},
+    {"hardware", "servo/relay control help", cmd_hardware},
 };
 #define N_CMD (sizeof(_table)/sizeof(_table[0]))
 
@@ -358,6 +483,22 @@ static void shell_exec(char *line)
         if (*p) { *p=0; p++; while (*p==' ') p++; }
     }
     if (!argc) return;
+
+    /* dynamic hardware commands: S<n> = servo (0..15), RL<n> = relay (1..8) */
+    if ((argv[0][0] == 'S' || argv[0][0] == 's') && argv[0][1] != '\0') {
+        int n = atoi(argv[0] + 1);
+        if (n >= 0 && n <= 15) { cmd_servo(argc, argv, n); return; }
+    }
+    if ((argv[0][0] == 'R' || argv[0][0] == 'r') &&
+        (argv[0][1] == 'L' || argv[0][1] == 'l') && argv[0][2] != '\0') {
+        int n = atoi(argv[0] + 2);
+        if (n >= 1 && n <= 8) { cmd_relay(argc, argv, n); return; }
+    }
+    if ((argv[0][0] == 'M' || argv[0][0] == 'm') &&
+        (argv[0][1] == 'P' || argv[0][1] == 'p') && argv[0][2] == '\0') {
+        cmd_pushrod(argc, argv); return;
+    }
+
     for (int i=0; i<N_CMD; i++)
         if (rt_strcmp(argv[0], _table[i].name)==0)
             { _table[i].func(argc,argv); return; }

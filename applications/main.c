@@ -11,6 +11,9 @@
 #include "esp8266/esp8266.h"
 #include "oled/OLED.h"
 #include "wifi_config.h"
+#include "hardware/pca9685.h"
+#include "hardware/relay.h"
+#include "hardware/pushrod.h"
 
 #define APP_FLASH_BASE  0x0800C000  /* must match APP1_BASE in partition.h */
 #define LED0_PIN        GET_PIN(A, 1)
@@ -75,11 +78,17 @@ int main(void)
     OLED_Init();
     OLED_ShowString(1, 1, "WiFi: init...");
 
+    /* init relay outputs (PE0..PE7) + PCA9685 servo driver (PB6/PB7) */
+    relay_init();
+    pushrod_init();   /* push rod motion thread (relays 1-3) */
+    if (pca9685_init() != 0)
+        rt_kprintf("[HW] PCA9685 not detected (check PB6/PB7 wiring)\r\n");
+
     /* load saved WiFi mode (default STA) + AP credentials */
     {
         int mode = WIFI_MODE_STA;
-        char ssid[33] = "STM32-AP";
-        char pass[65] = "12345678";
+        char ssid[33] = "STM32F407";
+        char pass[65] = "20090909";
         if (wifi_mode_load(&mode, ssid, sizeof(ssid), pass, sizeof(pass)) == 0)
         {
             /* saved config loaded */

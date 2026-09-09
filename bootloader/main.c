@@ -168,13 +168,16 @@ static int slot_empty(uint32_t base)
     return (*(volatile uint32_t*)base == 0xFFFFFFFFu);
 }
 
-/* A bootable firmware has sane SP (in 128KB SRAM) and PC (inside the slot). */
+/* A bootable firmware has sane SP (in 128KB SRAM) and PC (inside APP1).
+ * NOTE: APP2 is a byte-for-byte backup of APP1, so its vector table PC still
+ * points into APP1's range (the firmware is linked at APP1_BASE).  Checking
+ * against `base` would wrongly reject every valid APP2 backup. */
 static int vector_ok(uint32_t base)
 {
     uint32_t sp = *(volatile uint32_t*)base;
     uint32_t pc = *(volatile uint32_t*)(base + 4);
     if (sp < 0x20000000u || sp > 0x20020000u) return 0;
-    if (pc < base || pc >= base + FW_SIZE)    return 0;
+    if (pc < APP1_BASE || pc >= APP1_BASE + FW_SIZE)    return 0;
     return 1;
 }
 
@@ -231,9 +234,21 @@ static void jump_to_app(uint32_t addr)
 {
     uint32_t sp = *(uint32_t *)addr;
     uint32_t pc = *(uint32_t *)(addr + 4);
+
+    __disable_irq();
+
+    /* WiFi OTA leaves USART2 (ESP8266) in transparent mode with RX IRQ on and
+     * the module may still be resetting/spamming RXNE.  Reset the peripheral +
+     * clear NVIC so a pending IRQ can't fire during APP startup (which would
+     * hang rt_hw_board_init() before the uart driver is ready). */
+    NVIC_DisableIRQ(USART2_IRQn);
+    NVIC_ClearPendingIRQ(USART2_IRQn);
+    RCC->APB1RSTR |=  RCC_APB1RSTR_USART2RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_USART2RST;
+
     clock_switch_to_hsi();
     SysTick->CTRL = 0;
-    __disable_irq();
+
     SCB->VTOR = addr;
     __set_MSP(sp);
     ((void (*)(void))pc)();
@@ -319,7 +334,7 @@ static int tcp_ymodem_receive(uint32_t flash_addr, uint32_t max_size)
     while (1) {
         int h = -1;
         { uint32_t ts = _ym_ms;
-          while ((_ym_ms - ts) < 60000) {
+          while ((_ym_ms - ts) < OTA_DATA_TIMEOUT) {
             int c = tcp_getc(100);
             if (c >= 0 && (c == 0x01 || c == 0x02 || c == 0x04)) { h = c; break; }
           }

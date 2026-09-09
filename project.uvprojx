@@ -336,7 +336,7 @@
               <MiscControls></MiscControls>
               <Define>__CLK_TCK=RT_TICK_PER_SECOND, __STDC_LIMIT_MACROS, __RTTHREAD__, USE_HAL_DRIVER, RT_USING_ARMLIBC, RT_USING_LIBC, STM32F407xx</Define>
               <Undefine></Undefine>
-              <IncludePath>..\..\..\libcpu\arm\common;..\..\..\components\libc\compilers\common\extension;..\..\..\components\libc\compilers\common\extension\fcntl\octal;applications;..\..\..\components\drivers\include;applications\oled;..\..\..\components\drivers\include;..\..\..\libcpu\arm\cortex-m4;..\libraries\HAL_Drivers\CMSIS\Include;..\..\..\components\libc\posix\io\epoll;.;..\..\..\include;..\libraries\HAL_Drivers;..\..\..\components\libc\posix\ipc;..\..\..\components\libc\compilers\common\include;..\..\..\components\drivers\include;..\libraries\STM32F4xx_HAL\STM32F4xx_HAL_Driver\Inc;..\libraries\HAL_Drivers\config;board\CubeMX_Config\Inc;board;applications\esp8266;..\..\..\components\libc\posix\io\eventfd;..\..\..\components\drivers\include;..\..\..\components\libc\posix\io\poll;applications\shell;..\libraries\STM32F4xx_HAL\CMSIS\Device\ST\STM32F4xx\Include</IncludePath>
+              <IncludePath>..\..\..\libcpu\arm\common;..\..\..\components\libc\compilers\common\extension;..\..\..\components\libc\compilers\common\extension\fcntl\octal;applications;..\..\..\components\drivers\include;applications\oled;..\..\..\components\drivers\include;..\..\..\libcpu\arm\cortex-m4;..\libraries\HAL_Drivers\CMSIS\Include;..\..\..\components\libc\posix\io\epoll;.;..\..\..\include;..\libraries\HAL_Drivers;..\..\..\components\libc\posix\ipc;..\..\..\components\libc\compilers\common\include;..\..\..\components\drivers\include;..\libraries\STM32F4xx_HAL\STM32F4xx_HAL_Driver\Inc;..\libraries\HAL_Drivers\config;board\CubeMX_Config\Inc;board;applications\esp8266;..\..\..\components\libc\posix\io\eventfd;..\..\..\components\drivers\include;..\..\..\components\libc\posix\io\poll;applications\shell;applications\hardware;..\libraries\STM32F4xx_HAL\CMSIS\Device\ST\STM32F4xx\Include</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -739,6 +739,26 @@
               <FileName>shell.c</FileName>
               <FileType>1</FileType>
               <FilePath>applications\shell\shell.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>hardware</GroupName>
+          <Files>
+            <File>
+              <FileName>pca9685.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\hardware\pca9685.c</FilePath>
+            </File>
+            <File>
+              <FileName>relay.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\hardware\relay.c</FilePath>
+            </File>
+            <File>
+              <FileName>pushrod.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\hardware\pushrod.c</FilePath>
             </File>
           </Files>
         </Group>

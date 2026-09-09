@@ -144,7 +144,7 @@ int ymodem_receive(uint32_t flash_addr, uint32_t max_size)
      * Phase 2: receive remaining data packets.
      */
     while (1) {
-        int h = wait_hdr(60000);  /* 60s between packets */
+        int h = wait_hdr(OTA_DATA_TIMEOUT);  /* 15s between packets */
         if (h < 0) return -1;
 
         if (h == EOT) {

@@ -25,6 +25,21 @@ def wait_byte(ser, expect, timeout=1.0):
             return True
     return False
 
+def send_cmd(ser, cmd, char_delay=0.05):
+    """Send a shell command one character at a time.
+
+    The APP shell reads UART1 in POLLED mode (no RX interrupt — the console
+    device holds the port open without INT_RX, so shell_reader_thread polls
+    roughly every ~10 ms). A burst write of "ota\\r" (~0.4 ms at 115200)
+    overruns the single-byte USART receive register: only the first 'o' is
+    latched and the rest are dropped. That's why manual typing works but a
+    one-shot ser.write() doesn't. Spacing the chars lets the poll loop catch
+    every one.
+    """
+    for ch in cmd:
+        ser.write(ch.encode())
+        time.sleep(char_delay)
+
 def find_stm32():
     """Scan COM ports for an STM32 (look for '>' prompt)."""
     ports = list(serial.tools.list_ports.comports())
@@ -103,22 +118,18 @@ def main():
         sys.exit(1)
     time.sleep(0.3); ser.reset_input_buffer()
 
-    # Send 'ota' if APP is running (look for prompt)
-    print("Looking for STM32...")
-    ser.write(b'\r\n')
-    t0 = time.time(); prompt = False
-    while time.time() - t0 < 2:
-        if ser.in_waiting:
-            buf = ser.read(ser.in_waiting)
-            if b'>' in buf or b'STM32' in buf:
-                prompt = True; break
-        time.sleep(0.1)
-    if prompt:
-        print("Sending 'ota'...")
-        ser.write(b'ota\r\n')
+    # Send 'ota' (char-by-char) until the bootloader answers with 'C'.
+    # Retrying is safe: once the bootloader is up, the extra bytes are ignored
+    # by its Ymodem parser.
+    print("Sending 'ota'...")
+    t0 = time.time()
+    while time.time() - t0 < 40:
+        send_cmd(ser, 'ota\r')
+        if wait_byte(ser, [CRC], 1.0):
+            break
         time.sleep(0.5)
 
-    # Wait for bootloader 'C'
+    # Wait for bootloader 'C' (re-sync after the APP reboots into OTA mode)
     print("Waiting for bootloader...")
     ser.reset_input_buffer()
     for _ in range(120):

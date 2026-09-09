@@ -21,7 +21,7 @@
 #define OTA_FIRST_PKT_TIMEOUT  15000 /* max wait for first Ymodem packet   */
 #define OTA_WIFI_TIMEOUT       15000 /* max wait for WiFi connection        */
 #define OTA_TCP_TIMEOUT        10000 /* max wait for TCP connect            */
-#define OTA_DATA_TIMEOUT       30000 /* max silence before giving up        */
+#define OTA_DATA_TIMEOUT       15000 /* max silence between Ymodem packets */
 #define OTA_IDLE_MS            200   /* line-idle threshold in esp_recv     */
 
 #endif /* __OTA_CONFIG_H__ */
