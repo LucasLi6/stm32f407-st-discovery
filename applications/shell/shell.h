@@ -12,7 +12,7 @@
 
 #include <rtthread.h>
 
-#define SHELL_READER_STACK_SIZE   2048
+#define SHELL_READER_STACK_SIZE   4096
 #define SHELL_READER_PRIORITY     15
 #define SHELL_WRITER_STACK_SIZE   1024
 #define SHELL_WRITER_PRIORITY     14
@@ -20,5 +20,8 @@
 #define SHELL_LINE_MAX            128
 
 int shell_init(void);
+
+/* write a string to the shell output (used by the script runner thread) */
+void shell_put(const char *str);
 
 #endif

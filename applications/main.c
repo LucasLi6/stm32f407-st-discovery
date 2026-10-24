@@ -14,6 +14,12 @@
 #include "hardware/pca9685.h"
 #include "hardware/relay.h"
 #include "hardware/pushrod.h"
+#include "hardware/cprod.h"
+#include "hardware/lift.h"
+#include "flash_config.h"
+#include "servo_motion.h"
+#include "preset_store.h"
+#include "thread_store.h"
 
 #define APP_FLASH_BASE  0x0800C000  /* must match APP1_BASE in partition.h */
 #define LED0_PIN        GET_PIN(A, 1)
@@ -80,9 +86,23 @@ int main(void)
 
     /* init relay outputs (PE0..PE7) + PCA9685 servo driver (PB6/PB7) */
     relay_init();
-    pushrod_init();   /* push rod motion thread (relays 1-3) */
+    pushrod_init();   /* push rod motion thread (relays 6-8 H-bridge) */
+    cprod_init();     /* CP push rod motion thread (relays 4-5) */
+    lift_init();      /* lift platform motion thread (relays 2-3) */
     if (pca9685_init() != 0)
         rt_kprintf("[HW] PCA9685 not detected (check PB6/PB7 wiring)\r\n");
+
+    /* unified sector-2 flash config (WiFi + presets + thread scripts) */
+    flash_config_init();
+    wifi_config_init();
+    servo_motion_init();
+    {
+        int need_commit = 0;
+        need_commit |= preset_store_init();
+        need_commit |= thread_store_init();
+        if (need_commit)
+            flash_config_commit();
+    }
 
     /* load saved WiFi mode (default STA) + AP credentials */
     {

@@ -5,9 +5,15 @@
  *   WIFI_CONFIG: first 2 KB, 16 entries × 128 bytes
  *   MODE:        at 0x08008800
  *   OTA_CONFIG:  at 0x08009800
+ *
+ * Sector 2 is a single erase unit, so ALL writes go through flash_config
+ * (flash_config_commit erases sector 2 and replays every registered region
+ * from its RAM copy).  This file keeps authoritative RAM copies of the three
+ * WiFi regions; every save mutates RAM then commits.
  */
 
 #include "wifi_config.h"
+#include "flash_config.h"
 #include <rtthread.h>
 #include <rtdevice.h>
 #include <string.h>
@@ -17,8 +23,6 @@
 /* ---- STM32F407VET6 Sector 2 ---- */
 #define WIFI_FLASH_BASE     0x08008000UL
 #define WIFI_FLASH_SIZE     (2 * 1024)
-#define WIFI_FLASH_END      (WIFI_FLASH_BASE + WIFI_FLASH_SIZE)
-#define WIFI_FLASH_SECTOR   2
 #define ENTRY_SIZE          128
 #define ENTRY_COUNT         (WIFI_FLASH_SIZE / ENTRY_SIZE)
 
@@ -33,7 +37,7 @@ typedef struct {
     char     reserved[24];   /* 0x68: pad to 128 */
 } flash_entry_t;
 
-/* ---- WiFi mode config (sector 2, 0x08008800, in the 4KB gap) ---- */
+/* ---- WiFi mode config (sector 2, 0x08008800) ---- */
 #define WIFI_MODE_FLASH_BASE  0x08008800UL
 #define WIFI_MODE_MAGIC       0x4D4F4445UL   /* "MODE" */
 
@@ -44,8 +48,6 @@ typedef struct {
     char     ap_pass[64];    /* 0x28 */
     char     reserved[24];   /* 0x68: pad to 128 */
 } wifi_mode_raw_t;
-
-static wifi_mode_raw_t _mode_buf;
 
 /* ---- OTA server config (sector 2, 0x08009800) ---- */
 #define OTA_CONFIG_MAGIC   0x4F544143  /* "OTAC" */
@@ -61,103 +63,60 @@ typedef struct {
     char     reserved[22];
 } ota_config_raw_t;
 
-/* ---- shared work buffer (one copy, not per-function) ---- */
-static flash_entry_t _raw_buf[ENTRY_COUNT];       /* 2048 B */
-static wifi_info_t   _info_buf[WIFI_MAX_ENTRIES];  /* 1632 B */
+/* ---- authoritative RAM copies ---- */
+static flash_entry_t    _raw_buf[ENTRY_COUNT];      /* 2048 B */
+static wifi_info_t      _info_buf[WIFI_MAX_ENTRIES]; /* 1632 B */
+static wifi_mode_raw_t  _mode_buf;
+static ota_config_raw_t _ota_cfg;
 
-/* ---- internal flash ops (F4: 32-bit word writes, sector erase) ---- */
+/* ---- flash_config writebacks ---- */
 
-static int flash_load_all(flash_entry_t *entries)
+static int _wifi_wb(void)
 {
-    const flash_entry_t *src = (const flash_entry_t *)WIFI_FLASH_BASE;
-    for (int i = 0; i < ENTRY_COUNT; i++)
-        entries[i] = src[i];
-    return ENTRY_COUNT;
-}
-
-/* F4 sector erase (only sector 2 used here) */
-static void flash_erase_config_sector(void)
-{
-    if (FLASH->CR & FLASH_CR_LOCK) {
-        FLASH->KEYR = FLASH_KEY1;
-        FLASH->KEYR = FLASH_KEY2;
-    }
-
-    FLASH->CR |= FLASH_CR_SER;
-    FLASH->CR &= ~FLASH_CR_SNB_Msk;
-    FLASH->CR |= (WIFI_FLASH_SECTOR << FLASH_CR_SNB_Pos);
-    FLASH->CR |= FLASH_CR_STRT;
-    while (FLASH->SR & FLASH_SR_BSY);
-    FLASH->CR &= ~FLASH_CR_SER;
-
-    FLASH->CR |= FLASH_CR_LOCK;
-}
-
-/* F4 32-bit word write */
-static void flash_write_words(uint32_t addr, const uint32_t *data, int count)
-{
-    if (FLASH->CR & FLASH_CR_LOCK) {
-        FLASH->KEYR = FLASH_KEY1;
-        FLASH->KEYR = FLASH_KEY2;
-    }
-
-    FLASH->CR |= FLASH_CR_PG;
-    FLASH->CR = (FLASH->CR & ~FLASH_CR_PSIZE_Msk) | FLASH_CR_PSIZE_1;  /* 32-bit */
-    for (int i = 0; i < count; i++) {
-        *(volatile uint32_t *)(addr + i * 4) = data[i];
-        while (FLASH->SR & FLASH_SR_BSY);
-    }
-    FLASH->CR &= ~FLASH_CR_PG;
-
-    FLASH->CR |= FLASH_CR_LOCK;
-}
-
-/* sync the in-memory mode buffer from flash (so a sector erase doesn't lose it) */
-static void _mode_sync_from_flash(void)
-{
-    rt_memcpy(&_mode_buf, (const void *)WIFI_MODE_FLASH_BASE, sizeof(_mode_buf));
-}
-
-/* one owner of sector-2 writes: erase, then write wifi + mode + ota together.
- * Callers must leave _mode_buf in sync (via _mode_sync_from_flash, or set it). */
-static int _sector_commit(flash_entry_t *entries)
-{
-    ota_config_raw_t ota_saved;
-    rt_memcpy(&ota_saved, (const void *)OTA_CONFIG_BASE, sizeof(ota_saved));
-
-    flash_erase_config_sector();
-
-    uint32_t *src = (uint32_t *)entries;
+    uint32_t *src = (uint32_t *)_raw_buf;
     int count = ENTRY_COUNT * (ENTRY_SIZE / 4);
-    int has_data = 0;
-    for (int i = 0; i < count; i++) {
-        if (src[i] != 0xFFFFFFFF) { has_data = 1; break; }
-    }
-    if (has_data)
-        flash_write_words(WIFI_FLASH_BASE, src, count);
-
-    if (_mode_buf.magic == WIFI_MODE_MAGIC)
-        flash_write_words(WIFI_MODE_FLASH_BASE, (uint32_t *)&_mode_buf,
-                          (sizeof(_mode_buf) + 3) / 4);
-
-    if (ota_saved.magic == OTA_CONFIG_MAGIC)
-        flash_write_words(OTA_CONFIG_BASE, (uint32_t *)&ota_saved,
-                          (sizeof(ota_saved) + 3) / 4);
-
-    return 0;
+    int has = 0;
+    for (int i = 0; i < count; i++)
+        if (src[i] != 0xFFFFFFFF) { has = 1; break; }
+    if (has)
+        flash_config_write_words(WIFI_FLASH_BASE, src, count);
+    return has ? (count * 4) : 0;
 }
 
-static int flash_save_all(flash_entry_t *entries)
+static int _mode_wb(void)
 {
-    _mode_sync_from_flash();   /* preserve current mode across the erase */
-    return _sector_commit(entries);
+    if (_mode_buf.magic == WIFI_MODE_MAGIC)
+        flash_config_write_words(WIFI_MODE_FLASH_BASE, (uint32_t *)&_mode_buf,
+                                 (sizeof(_mode_buf) + 3) / 4);
+    return sizeof(_mode_buf);
+}
+
+static int _ota_wb(void)
+{
+    if (_ota_cfg.magic == OTA_CONFIG_MAGIC)
+        flash_config_write_words(OTA_CONFIG_BASE, (uint32_t *)&_ota_cfg,
+                                 (sizeof(_ota_cfg) + 3) / 4);
+    return sizeof(_ota_cfg);
+}
+
+/* load RAM copies from flash + register with flash_config. Returns 0 (WiFi
+ * config persists across firmware updates, unlike preset/thread defaults). */
+int wifi_config_init(void)
+{
+    rt_memcpy(_raw_buf,  (const void *)WIFI_FLASH_BASE,      sizeof(_raw_buf));
+    rt_memcpy(&_mode_buf, (const void *)WIFI_MODE_FLASH_BASE, sizeof(_mode_buf));
+    rt_memcpy(&_ota_cfg,  (const void *)OTA_CONFIG_BASE,      sizeof(_ota_cfg));
+
+    flash_config_register(WIFI_FLASH_BASE,      WIFI_FLASH_SIZE,      _wifi_wb);
+    flash_config_register(WIFI_MODE_FLASH_BASE, sizeof(_mode_buf),    _mode_wb);
+    flash_config_register(OTA_CONFIG_BASE,      sizeof(_ota_cfg),     _ota_wb);
+    return 0;
 }
 
 /* ---- WiFi mode (STA / AP) persistence ---- */
 
 int wifi_mode_load(int *mode, char *ssid, int ssid_sz, char *pass, int pass_sz)
 {
-    _mode_sync_from_flash();
     if (_mode_buf.magic != WIFI_MODE_MAGIC)
         return -1;
 
@@ -169,9 +128,6 @@ int wifi_mode_load(int *mode, char *ssid, int ssid_sz, char *pass, int pass_sz)
 
 int wifi_mode_save(int mode, const char *ssid, const char *pass)
 {
-    flash_entry_t *raw = _raw_buf;
-    flash_load_all(raw);
-
     rt_memset(&_mode_buf, 0, sizeof(_mode_buf));
     _mode_buf.magic = WIFI_MODE_MAGIC;
     _mode_buf.mode  = (uint32_t)mode;
@@ -180,7 +136,8 @@ int wifi_mode_save(int mode, const char *ssid, const char *pass)
     _mode_buf.ap_ssid[31] = '\0';
     _mode_buf.ap_pass[63] = '\0';
 
-    return _sector_commit(raw);
+    flash_config_commit();
+    return 0;
 }
 
 static int cmp_priority(const void *a, const void *b)
@@ -195,7 +152,6 @@ static int cmp_priority(const void *a, const void *b)
 int wifi_config_load(wifi_info_t *out, int max_entries)
 {
     flash_entry_t *raw = _raw_buf;
-    flash_load_all(raw);
 
     int count = 0;
     for (int i = 0; i < ENTRY_COUNT && count < max_entries; i++)
@@ -221,7 +177,6 @@ int wifi_config_load(wifi_info_t *out, int max_entries)
 int wifi_config_save(const char *ssid, const char *password, int priority)
 {
     flash_entry_t *raw = _raw_buf;
-    flash_load_all(raw);
 
     /* determine priority if auto */
     if (priority <= 0)
@@ -258,13 +213,13 @@ int wifi_config_save(const char *ssid, const char *password, int priority)
     raw[slot].ssid[31]     = '\0';
     raw[slot].password[63] = '\0';
 
-    return flash_save_all(raw);
+    flash_config_commit();
+    return 0;
 }
 
 int wifi_config_delete(int priority)
 {
     flash_entry_t *raw = _raw_buf;
-    flash_load_all(raw);
 
     int found = 0;
     for (int i = 0; i < ENTRY_COUNT; i++)
@@ -284,13 +239,13 @@ int wifi_config_delete(int priority)
 
     if (!found) return -1;
 
-    return flash_save_all(raw);
+    flash_config_commit();
+    return 0;
 }
 
 int wifi_config_swap(int prio1, int prio2)
 {
     flash_entry_t *raw = _raw_buf;
-    flash_load_all(raw);
 
     int idx1 = -1, idx2 = -1;
     for (int i = 0; i < ENTRY_COUNT; i++) {
@@ -304,7 +259,8 @@ int wifi_config_swap(int prio1, int prio2)
     raw[idx1].priority = raw[idx2].priority;
     raw[idx2].priority = tmp;
 
-    return flash_save_all(raw);
+    flash_config_commit();
+    return 0;
 }
 
 void wifi_config_show(void (*write_fn)(const char *))
@@ -400,8 +356,6 @@ int wifi_config_connect(rt_device_t esp_dev)
 
 /* ---- OTA server config (Sector 2, 0x08009800) ---- */
 
-static ota_config_raw_t _ota_cfg;
-
 void ota_config_load_defaults(void)
 {
     rt_memset(&_ota_cfg, 0xFF, sizeof(_ota_cfg));
@@ -409,11 +363,10 @@ void ota_config_load_defaults(void)
 
 int ota_config_get(char *ip, int ip_size, int *port, char *path, int path_size)
 {
-    const ota_config_raw_t *cfg = (const ota_config_raw_t *)OTA_CONFIG_BASE;
-    if (cfg->magic == OTA_CONFIG_MAGIC && cfg->server_ip[0] != 0xFF) {
-        rt_strncpy(ip,   cfg->server_ip,  ip_size - 1);
-        *port = cfg->server_port;
-        rt_strncpy(path, cfg->http_path,  path_size - 1);
+    if (_ota_cfg.magic == OTA_CONFIG_MAGIC && _ota_cfg.server_ip[0] != 0xFF) {
+        rt_strncpy(ip,   _ota_cfg.server_ip,  ip_size - 1);
+        *port = _ota_cfg.server_port;
+        rt_strncpy(path, _ota_cfg.http_path,  path_size - 1);
         ip[ip_size - 1]     = '\0';
         path[path_size - 1] = '\0';
         return 0;
@@ -429,8 +382,6 @@ int ota_config_set(const char *ip, int port, const char *path)
     _ota_cfg.server_port = (uint16_t)port;
     rt_strncpy(_ota_cfg.http_path,  path, OTA_PATH_MAX - 1);
 
-    /* write OTA config (sector already erased with WiFi config) */
-    flash_write_words(OTA_CONFIG_BASE, (uint32_t *)&_ota_cfg,
-                      (sizeof(_ota_cfg) + 3) / 4);
+    flash_config_commit();
     return 0;
 }

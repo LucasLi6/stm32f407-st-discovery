@@ -15,6 +15,9 @@ void relay_init(void)
         rt_pin_mode(RELAY_PIN(i), PIN_MODE_OUTPUT);
         rt_pin_write(RELAY_PIN(i), RELAY_OFF);
     }
+
+    /* CP 推杆 OFF 态 = RL4 开、RL5 关：上电即让 RL4 开启，CP 处于 OFF（安全）态 */
+    relay_set(4, 1);
 }
 
 void relay_set(int num, int on)

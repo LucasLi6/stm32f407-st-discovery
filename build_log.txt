@@ -1,8 +1,8 @@
 *** Using Compiler 'V5.06 update 5 (build 528)', folder: 'F:\keil5\ARM\ARMCC\Bin'
 Build target 'rtthread'
-compiling shell.c...
+compiling thread_store.c...
 linking...
-Program Size: Code=71340 RO-data=7208 RW-data=944 ZI-data=16456  
+Program Size: Code=84232 RO-data=9208 RW-data=1052 ZI-data=33796  
 After Build - User command #1: fromelf --bin .\build\keil\Obj\rtthread.axf --output rtthread.bin
 ".\build\keil\Obj\rtthread.axf" - 0 Error(s), 0 Warning(s).
-Build Time Elapsed:  00:00:02
+Build Time Elapsed:  00:00:01

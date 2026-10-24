@@ -107,11 +107,20 @@ void servo_set_angle(uint8_t num, uint16_t deg)
     if (num > 15) return;
     if (deg > PCA9685_SERVO_MAX_DEG) deg = PCA9685_SERVO_MAX_DEG;
 
-    uint16_t off = (uint16_t)(PCA9685_SERVO_PULSE_0
-                    + (uint32_t)deg * PCA9685_SERVO_SLOPE_N / PCA9685_SERVO_SLOPE_D);
+    int32_t off = PCA9685_SERVO_CENTER
+                + ((int32_t)deg - PCA9685_SERVO_NEUTRAL_DEG)
+                  * PCA9685_SERVO_SLOPE_N / PCA9685_SERVO_SLOPE_D;
+    if (off < 0)    off = 0;
     if (off > 4095) off = 4095;
 
-    pca9685_set_pwm(num, 0, off);
+    pca9685_set_pwm(num, 0, (uint16_t)off);
+}
+
+void servo_set_off(uint8_t num)
+{
+    if (num > 15) return;
+    /* OFF = 0x1000 sets LEDn_OFF "full-off" bit -> channel driven low, no PWM */
+    pca9685_set_pwm(num, 0, 0x1000);
 }
 
 int pca9685_init(void)
@@ -128,6 +137,6 @@ int pca9685_init(void)
     pca_set_freq(PCA9685_SERVO_FREQ);
 
     for (uint8_t i = 0; i < 16; i++)
-        servo_set_angle(i, PCA9685_SERVO_NEUTRAL_DEG);  /* 360 servo: stop all */
+        servo_set_off(i);                          /* start with no PWM output */
     return 0;
 }

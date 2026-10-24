@@ -24,6 +24,10 @@ typedef struct {
 
 /* ---- public API ---- */
 
+/* Load RAM copies from flash + register regions with flash_config.
+ * Must be called once at boot, before any other wifi_* / flash_config_commit. */
+int wifi_config_init(void);
+
 /* Load all entries from flash, sorted by priority (ascending).
  * Returns count. */
 int wifi_config_load(wifi_info_t *entries, int max_entries);

@@ -386,6 +386,26 @@
               <FilePath>applications\wifi_config.c</FilePath>
             </File>
             <File>
+              <FileName>flash_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\flash_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>servo_motion.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\servo_motion.c</FilePath>
+            </File>
+            <File>
+              <FileName>preset_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\preset_store.c</FilePath>
+            </File>
+            <File>
+              <FileName>thread_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\thread_store.c</FilePath>
+            </File>
+            <File>
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>applications\main.c</FilePath>
@@ -759,6 +779,16 @@
               <FileName>pushrod.c</FileName>
               <FileType>1</FileType>
               <FilePath>applications\hardware\pushrod.c</FilePath>
+            </File>
+            <File>
+              <FileName>cprod.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\hardware\cprod.c</FilePath>
+            </File>
+            <File>
+              <FileName>lift.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>applications\hardware\lift.c</FilePath>
             </File>
           </Files>
         </Group>
