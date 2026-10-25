@@ -1,106 +1,123 @@
-# STM32F4DISCOVERY 开发板 BSP 说明
+# STM32F407 双分区 OTA Bootloader + RT-Thread 执行器控制
 
-## 简介
+基于 STM32F407VET6（Cortex-M4, 168MHz, 512KB Flash / 128KB RAM）的固件工程，包含两部分：
 
-本文档为 RT-Thread 开发团队为 STM32F4DISCOVERY 开发板提供的 BSP (板级支持包) 说明。
+- **Bootloader**（裸机，不依赖 RT-Thread）：双分区（A/B）OTA 升级，支持串口 Ymodem 与 ESP8266 WiFi 两种升级通道，带 CRC32 校验与掉电恢复。
+- **应用**（RT-Thread）：OLED 显示、ESP8266 WiFi、交互式终端 Shell，以及一套电机执行器控制（继电器、舵机、电动推杆、升降台）。
 
-主要内容如下：
+## 功能特性
 
-- 开发板资源介绍
-- BSP 快速上手
-- 进阶使用方法
+### Bootloader
+- 双分区 A/B OTA：`APP1` 为常驻运行槽位，`APP2` 为字节级备份槽位，升级失败可回滚。
+- 校验与恢复：镜像 CRC32 校验；OTA 进行中掉电后，通过 Boot meta 状态机恢复，保证固件始终可用。
+- 两种 OTA 通道：
+  - **串口 OTA**：UART1 上的 Ymodem 协议。
+  - **WiFi OTA**：ESP8266 建立 TCP 服务器，Ymodem-over-TCP。
+- 状态指示：LED 快闪 = 连接中，常亮 = 客户端已连接，慢闪 3 次 = 升级完成。
 
-通过阅读快速上手章节开发者可以快速地上手该 BSP，将 RT-Thread 运行在开发板上。在进阶使用指南章节，将会介绍更多高级功能，帮助开发者利用 RT-Thread 驱动更多板载资源。
+### 应用
+- **终端 Shell**：本地 UART1（USB 串口）＋ 远程 UART2（ESP8266 TCP Server，端口 23，支持 telnet）。
+- **WiFi**：STA / AP 双模式切换，AP 凭据与配置持久化存储。
+- **执行器控制**：
+  - 8 路继电器（PE0..PE7，低电平有效）。
+  - PCA9685 16 通道 PWM / 舵机驱动（软件 I2C：SCL=PB6, SDA=PB7）。
+  - 电动推杆 MP（继电器 6-8，H 桥）、CP 推杆（继电器 4-5）、升降台 LIFT（继电器 2-3）。
+  - 舵机运动、限位开关、预设（preset）与线程脚本（thread script）存储。
 
-## 开发板介绍
+## Flash 分区表
 
-STM32F4DISCOVERY 是 ST 推出的一款基于 ARM Cortex-M4 内核的开发板，最高主频为 168Mhz，该开发板具有丰富的板载资源，可以充分发挥 STM32F407 的芯片性能。
+STM32F407VET6 共 512KB Flash，扇区大小 16/16/16/16/64/128/128/128 KB：
 
-开发板外观如下图所示：
+| 区域 | 起始地址 | 大小 | 用途 |
+| :--- | :--- | :---: | :--- |
+| S0 | 0x08000000 | 16 KB | Bootloader |
+| S1 | 0x08004000 | 16 KB | Boot meta（槽位 CRC + OTA 状态） |
+| S2 | 0x08008000 | 16 KB | 配置（WiFi / 模式 / OTA 服务器） |
+| S3~S5 | 0x0800C000 | 208 KB | APP1（主槽位，始终从此启动） |
+| S6~S7 | 0x08040000 | 256 KB | APP2（备份副本） |
 
-![board](figures/board.png)
+每个分区均为整数个扇区，可独立擦除。固件镜像固定为 `FW_SIZE = APP1_SIZE = 208 KB`，APP2 多出的 48 KB 为冗余空间，仅前 208 KB 参与拷贝与校验。
 
-该开发板常用 **板载资源** 如下：
+## 目录结构
 
-- MCU：STM32F407VGT6，主频 168MHz，1024KB FLASH ，192KB RAM
-- 常用外设
-  - LED：4个用户 LEDs， LD3（orange，PD13），LD4(green，PD12)，LD5 (red,PD14) and LD6 (blue，PD15)。
-  - 按键，2个，Reset 和 User。
-- 调试接口，板载 ST-LINK/V2调试器，使用SWD调试模式。	
+```
+.
+├── bootloader/            裸机 Bootloader（Keil MDK 工程）
+│   ├── main.c             入口 + OTA 状态机
+│   ├── esp8266_at.c       ESP8266 AT 指令 / TCP 透传
+│   ├── ymodem.c           Ymodem 接收
+│   ├── flash_ops.c        内部 Flash 擦写
+│   ├── partition.h        Flash 分区定义（bootloader 与应用共享）
+│   └── oled.c             OLED 显示
+├── applications/          RT-Thread 应用
+│   ├── main.c             应用入口
+│   ├── hardware/          pca9685 / relay / pushrod / cprod / lift
+│   ├── esp8266/           WiFi 驱动（STA/AP）
+│   ├── oled/              OLED 显示
+│   ├── shell/             终端 Shell
+│   ├── wifi_config.c      WiFi 配置
+│   ├── preset_store.c     预设存储
+│   ├── thread_store.c     线程脚本存储 / 运行器
+│   ├── servo_motion.c     舵机运动
+│   └── flash_config.c     统一 Flash 配置读写
+├── ota.py                 一键串口 OTA（自动识别 COM、Ymodem 传输）
+├── tcp_server.py          一键 WiFi OTA（局域网扫描 + 分块推送）
+├── ymodem_send.py         Ymodem 发送端
+└── hex2bin.py             HEX 转 BIN
+```
 
-开发板更多详细信息请参考 ST 官方 [STM32F4DISCOVERY开发板介绍](https://www.st.com/content/st_com/en/products/evaluation-tools/product-evaluation-tools/mcu-eval-tools/stm32-mcu-eval-tools/stm32-mcu-discovery-kits/stm32f4discovery.html)。
+## 构建
 
-## 外设支持
+- **应用**：Keil MDK5 打开 `project.uvprojx`，或用 RT-Thread `scons` 工具链构建，输出 `rtthread.bin`。
+- **Bootloader**：Keil MDK5 打开 `bootloader.uvprojx`，输出 `bootloader.bin`（烧录到 0x08000000）。
 
-本 BSP 目前对外设的支持情况如下：
-
-| **片上外设** | **支持情况** |               **备注**                |
-| :------------ | :----------: | :-----------------------------------: |
-| GPIO         |     支持     | PA0, PA1... PH1 ---> PIN: 0, 1...144 |
-| UART         |     支持     |              UART1              |
-| SPI          |     支持     |               SPI1               |
-| I2C          |     支持     |               软件 I2C                |
+> 应用链接地址为 `0x0800C000`（对应 `partition.h` 中的 `APP1_BASE`）。
 
 ## 使用说明
 
-使用说明分为如下两个章节：
+### 串口 Shell
 
-- 快速上手
+串口 115200-8-1-N，复位后进入 Shell，输入 `help` 查看命令。常用命令：
 
-    本章节是为刚接触 RT-Thread 的新手准备的使用说明，遵循简单的步骤即可将 RT-Thread 操作系统运行在该开发板上，看到实验效果 。
+| 命令 | 说明 |
+| :--- | :--- |
+| `help` / `hardware` | 显示帮助 |
+| `info` / `who` / `reset` | 系统信息 / 连接状态 / 复位 |
+| `led on\|off\|blink` | LED 控制 |
+| `oled <行> <文本>` | OLED 显示（行 2-4） |
+| `wifi show\|save\|delete\|mode` | WiFi 配置与 STA/AP 切换 |
+| `S<n> <度> [ms]` | 舵机 n（0-15）转到指定角度 |
+| `MP <UP\|DN> [ms]` | 电动推杆（继电器 6-8） |
+| `CP <UP\|DN> [ms]` | CP 推杆（继电器 4-5） |
+| `LIFT <UP\|DN> [ms\|end]` | 升降台（继电器 2-3，支持限位） |
+| `set S<n> P<m> ...` | 保存舵机 / 推杆预设 |
+| `Run <name>` / `edit <name>` | 运行 / 编辑线程脚本（Thread1..16） |
+| `stop` | 停止一切并复位执行器 |
 
-- 进阶使用
+### OTA 升级
 
-    本章节是为需要在 RT-Thread 操作系统上使用更多开发板资源的开发者准备的。通过使用 ENV 工具对 BSP 进行配置，可以开启更多板载资源，实现更多高级功能。
+**串口 OTA**（自动识别 COM 口，通过 Ymodem 传输 `rtthread.bin`）：
 
-
-### 快速上手
-
-本 BSP 为开发者提供 MDK4、MDK5 和 IAR 工程，并且支持 GCC 开发环境。下面以 MDK5 开发环境为例，介绍如何将系统运行起来。
-
-#### 硬件连接
-
-使用数据线连接开发板到 PC，打开电源开关。
-
-#### 编译下载
-
-双击 project.uvprojx 文件，打开 MDK5 工程，编译并下载程序到开发板。
-
-> 工程默认配置使用 ST-LINK 下载程序，在通过ST-LINK 连接开发板的基础上，点击下载按钮即可下载程序到开发板
-
-#### 运行结果
-
-下载程序成功之后，系统会自动运行，观察开发板上 LED 的运行效果，红色 LD1 和 LD2 常亮，红色 LD5 会周期性闪烁。
-
-连接开发板对应串口到 PC , 在终端工具里打开相应的串口（115200-8-1-N），复位设备后，可以看到 RT-Thread 的输出信息:
-
-```c
- \ | /
-- RT -     Thread Operating System
- / | \     3.1.1 build Nov 19 2018
- 2006 - 2018 Copyright by rt-thread team
-msh >
+```bat
+ota.bat
 ```
-### 进阶使用
 
-此 BSP 默认只开启了 GPIO 和 串口1 的功能，更多高级功能，需要利用 ENV 工具对 BSP 进行配置，步骤如下：
+**WiFi OTA**（局域网扫描 ESP8266，自动分块推送）：
 
-1. 在 bsp 下打开 env 工具。
+```bat
+tcp_server.bat
+```
 
-2. 输入`menuconfig`命令配置工程，配置好之后保存退出。
+或手动流程：Shell 输入 `ota serial`（串口）/ `ota wifi`（WiFi）→ 设备重启进入 Bootloader → 主机发送固件 → 校验成功后跳转新固件。
 
-3. 输入`pkgs --update`命令更新软件包。
+## 硬件连接
 
-4. 输入`scons --target=mdk4/mdk5/iar` 命令重新生成工程。
-
-本章节更多详细的介绍请参考 [STM32 系列 BSP 外设驱动使用教程](../docs/STM32系列BSP外设驱动使用教程.md)。
-
-## 注意事项
-
-暂无
-
-## 联系人信息
-
-维护人:
-
-- [misonyo](https://github.com/misonyo) 
+| 功能 | 引脚 |
+| :--- | :--- |
+| 串口控制台 UART1 | PA9 (TX) / PA10 (RX) |
+| ESP8266 UART2 | PA2 (TX) / PA3 (RX) |
+| LED（低电平点亮） | PA1 |
+| 继电器 1-8（低电平有效） | PE0..PE7 |
+| PCA9685 软件 I2C | SCL=PB6, SDA=PB7 |
+| 推杆限位开关 | PC0 |
+| 升降台下限位开关 | PC1（S2） |
